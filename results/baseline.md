@@ -11,6 +11,19 @@ Measured on Jetson Orin Nano (MAXN power mode), input 1×3×640×640.
 
 FP16 speedup over FP32: **2.76× GPU compute, 2.95× throughput**.
 
+## End-to-end Python pipeline (FP16)
+
+Measured on test image (810×1080) with `scripts/test_inference.py`:
+
+| Stage | Latency (mean) |
+|---|---|
+| Engine GPU compute (trtexec) | 4.33 ms |
+| Python end-to-end (preprocess + infer + NMS) | 27.62 ms |
+| Effective FPS | 36.2 |
+
+Overhead breakdown (rough): preprocess ~6ms, H2D ~1ms, GPU ~4.5ms,
+D2H ~1ms, postprocess+NMS ~15ms. Postprocessing dominates.
+
 ## Source
 
 - ONNX: `models/yolov8n.onnx` (opset 12, simplify=True, imgsz=640)
