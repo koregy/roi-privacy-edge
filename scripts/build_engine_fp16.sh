@@ -38,7 +38,7 @@ echo ""
     --onnx="$ONNX_PATH" \
     --saveEngine="$ENGINE_PATH" \
     --fp16 \
-    --workspace=2048 \
+    --memPoolSize=workspace:2048M \
     --verbose 2>&1 | tee "$LOG_PATH"
 
 echo ""
