@@ -128,6 +128,7 @@ class ReceiveStats:
     frames_complete: int = 0
     frames_partial_ttl: int = 0
     orphan_patches: int = 0   # patches arrived without FRAME_HEADER
+    recv_errors: int = 0        # non-blocking OSError on recvfrom
 
 
 class UDPReceiver:
@@ -172,9 +173,9 @@ class UDPReceiver:
                     break
                 time.sleep(0.0005)
                 continue
-            except OSError as e:
-            # Catch other socket errors (closed socket, network unreachable, etc.)
-            # so the receiver doesn't crash. Count them for diagnostics.
+            except OSError:
+                # Catch other socket errors (closed socket, network unreachable, etc.)
+                # so the receiver doesn't crash. Count them for diagnostics.
                 self.stats.recv_errors += 1
                 break
 
