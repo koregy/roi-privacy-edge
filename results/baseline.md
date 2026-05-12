@@ -56,3 +56,23 @@ Knee around q=85-90 — above q=90, +36% bytes for +5q (visually
 imperceptible). Default `DEFAULT_JPEG_QUALITY=75` set as bytes/quality
 sweet spot. Full-frame 1080p JPEG baseline for comparison: ~200-400 KB,
 so ROI approach already yields ~3-4× reduction even at 4 persons.
+
+## UDP transport baseline (Day 5, same-subnet Wi-Fi)
+
+Setup: Jetson Orin Nano (192.168.35.97) → Laptop (192.168.35.153),
+same Wi-Fi AP, no other heavy traffic during measurement.
+
+Workload: 100 frames of persons.jpg @ 30 FPS (interval 33.3 ms),
+4 person patches per frame, JPEG q=75, 64 chunks per frame.
+
+Results:
+- 6,400 / 6,400 chunks delivered (0% chunk loss)
+- 400 / 400 patches complete (100% patch delivery)
+- 0 corrupted packets, 0 duplicates
+- 0 send errors on sender side
+- Total throughput ≈ 21 Mbps over 3.3 s (8.8 MB)
+
+Note: clean Wi-Fi baseline shows zero natural loss, which means
+RQ4 (recovery layer) evaluation requires artificial loss injection.
+Plan for Week 4: tc netem on receiver's wlan interface, sweep
+loss rates 1% / 5% / 10% / 20% to characterize recovery behavior.
