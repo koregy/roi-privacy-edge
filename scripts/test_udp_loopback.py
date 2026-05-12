@@ -1,7 +1,12 @@
 """End-to-end UDP loopback sanity check (single process, 127.0.0.1).
 
-Day 6: tests FRAME_HEADER plumbing too. Asserts that the receiver yields
-a ReceivedFrame event with the correct expected_patches count and size.
+Day 6: tests FRAME_HEADER plumbing (ReceivedFrame event w/ expected_patches
+and frame size).
+
+Week 2 prep: also verifies expanded_bbox round-trip. expanded_bbox is
+carried as an 8-byte prefix on chunk 0 of each patch (see common/packet.py).
+The original bbox stays in the packet header; expanded comes back as a
+new field on ReceivedPatch.
 """
 
 from __future__ import annotations
@@ -54,12 +59,14 @@ def main() -> None:
         f"sizes={[e.size_bytes for e in encoded]} B"
     )
 
-    truth = {(e.frame_id, e.det_id): e.data for e in encoded}
+    # Keep the full EncodedPatch as truth so we can check bbox/expanded_bbox
+    # round-trip in addition to JPEG bytes.
+    truth = {(e.frame_id, e.det_id): e for e in encoded}
 
     port = _pick_free_port()
     print(f"[net]     binding receiver on {HOST}:{port}")
 
-    received_patches: dict[tuple[int, int], bytes] = {}
+    received_patches: dict[tuple[int, int], ReceivedPatch] = {}
     received_frames: list[ReceivedFrame] = []
     completed_count = 0
     incomplete_count = 0
@@ -84,7 +91,7 @@ def main() -> None:
                 if isinstance(event, ReceivedPatch):
                     key = (event.frame_id, event.det_id)
                     if event.complete:
-                        received_patches[key] = event.data
+                        received_patches[key] = event
                         completed_count += 1
                         print(
                             f"          ✓ patch complete frame={event.frame_id} "
@@ -119,11 +126,11 @@ def main() -> None:
         if got is None:
             print(f"          ✗ {key}: MISSING")
             all_ok = False
-        elif got != want:
-            print(f"          ✗ {key}: MISMATCH ({len(want)} vs {len(got)})")
+        elif got.data != want.data:
+            print(f"          ✗ {key}: MISMATCH ({len(want.data)} vs {len(got.data)})")
             all_ok = False
         else:
-            print(f"          ✓ {key}: {len(got)} B identical")
+            print(f"          ✓ {key}: {len(got.data)} B identical")
 
     print()
     print("[verify]  FRAME_HEADER plumbing")
@@ -157,6 +164,38 @@ def main() -> None:
                 f"size={rf.frame_w}x{rf.frame_h} complete=True"
             )
         all_ok = all_ok and ok_block
+
+    print()
+    print("[verify]  bbox round-trip (original in header, expanded in chunk 0 prefix)")
+    bbox_ok = True
+    for key in sorted(truth.keys()):
+        want = truth[key]
+        got = received_patches.get(key)
+        if got is None:
+            # already counted as MISSING above; skip without double-counting
+            continue
+        if got.bbox != want.original_bbox:
+            print(
+                f"          ✗ {key}: original bbox mismatch "
+                f"got={got.bbox} want={want.original_bbox}"
+            )
+            bbox_ok = False
+            continue
+        if got.expanded_bbox is None:
+            print(f"          ✗ {key}: expanded_bbox is None (chunk 0 lost?)")
+            bbox_ok = False
+            continue
+        if got.expanded_bbox != want.expanded_bbox:
+            print(
+                f"          ✗ {key}: expanded_bbox mismatch "
+                f"got={got.expanded_bbox} want={want.expanded_bbox}"
+            )
+            bbox_ok = False
+            continue
+        print(
+            f"          ✓ {key}: original={got.bbox} expanded={got.expanded_bbox}"
+        )
+    all_ok = all_ok and bbox_ok
 
     print()
     print(f"[result]  {'PASS ✓' if all_ok else 'FAIL ✗'}")

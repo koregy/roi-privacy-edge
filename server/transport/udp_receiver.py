@@ -30,6 +30,8 @@ from common.packet import (
     PKT_TYPE_PATCH_CHUNK,
     PacketHeader,
     parse_frame_header_payload,
+    unpack_patch_meta_prefix,
+    PATCH_META_PREFIX_SIZE,
 )
 
 
@@ -71,6 +73,7 @@ class ReceivedPatch:
     det_id: int
     quality: int
     bbox: tuple[int, int, int, int]
+    expanded_bbox: tuple[int, int, int, int] | None   # from chunk 0 prefix; None if chunk 0 lost
     confidence: float
     data: bytes
     complete: bool
@@ -191,10 +194,28 @@ class UDPReceiver:
             self.stats.packets_dropped_bad_header += 1
             return
 
-        payload = buf[HEADER_SIZE : HEADER_SIZE + hdr.payload_len]
-        if len(payload) != hdr.payload_len:
+        #   payload = buf[HEADER_SIZE : HEADER_SIZE + hdr.payload_len]
+        #   if len(payload) != hdr.payload_len:
+        #       self.stats.packets_dropped_bad_payload += 1
+        #   return
+
+        raw_payload = buf[HEADER_SIZE : HEADER_SIZE + hdr.payload_len]
+        if len(raw_payload) != hdr.payload_len:
             self.stats.packets_dropped_bad_payload += 1
             return
+
+        # chunk 0 carries an 8-byte expanded_bbox prefix before JPEG bytes.
+        # chunks > 0 carry only JPEG bytes.
+        if hdr.chunk_idx == 0:
+            try:
+                expanded_bbox = unpack_patch_meta_prefix(raw_payload)
+            except ValueError:
+                self.stats.packets_dropped_bad_payload += 1
+                return
+            payload = raw_payload[PATCH_META_PREFIX_SIZE:]
+        else:
+            expanded_bbox = None
+            payload = raw_payload
 
         if hdr.pkt_type == PKT_TYPE_FRAME_HEADER:
             self._handle_frame_header(hdr.frame_id, payload)
@@ -270,6 +291,7 @@ class UDPReceiver:
             return ReceivedPatch(
                 frame_id=asm.frame_id, det_id=asm.det_id,
                 quality=asm.quality, bbox=asm.bbox,
+                expanded_bbox=asm.expanded_bbox,
                 confidence=asm.confidence,
                 data=asm.assemble(),
                 complete=True,

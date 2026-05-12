@@ -126,7 +126,20 @@ def _paste(canvas: np.ndarray, patch_img: np.ndarray, p: ReceivedPatch) -> None:
     expanded_bbox over the wire too and paste with the margin.
     """
     H, W = canvas.shape[:2]
-    x1, y1, x2, y2 = p.bbox
+
+    # Prefer expanded_bbox (the actual crop region used on the edge).
+    # Falls back to original bbox if chunk 0 was lost — patch will be
+    # slightly mis-sized but better than dropping.
+    if p.expanded_bbox is not None:
+        x1, y1, x2, y2 = p.expanded_bbox
+    else:
+        # logger may not be set up here; use print or your project's convention
+        print(
+            f"[stitcher] frame={p.frame_id} det={p.det_id}: "
+            f"expanded_bbox missing (chunk 0 lost), falling back to original bbox"
+        )
+        x1, y1, x2, y2 = p.bbox
+
     x1c, y1c = max(0, x1), max(0, y1)
     x2c, y2c = min(W, x2), min(H, y2)
     target_w = x2c - x1c

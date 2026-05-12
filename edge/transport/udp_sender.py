@@ -86,6 +86,7 @@ class UDPSender:
             frame_id=enc.frame_id, det_id=enc.det_id,
             quality=enc.quality,
             bbox=enc.original_bbox,
+            expanded_bbox=enc.expanded_bbox,
             confidence=enc.conf,
             jpeg_bytes=enc.data,
         )
