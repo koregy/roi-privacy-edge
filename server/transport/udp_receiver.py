@@ -151,6 +151,7 @@ class UDPReceiver:
             pass
         self._sock.bind((bind_host, int(bind_port)))
         self._sock.setblocking(False)
+        self._packet_filter = packet_filter
 
         self._patch_ttl_s = float(patch_ttl_s)
         self._frame_ttl_s = float(frame_ttl_s)
