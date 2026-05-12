@@ -117,13 +117,14 @@ def _decode_jpeg(data: bytes) -> Optional[np.ndarray]:
 
 
 def _paste(canvas: np.ndarray, patch_img: np.ndarray, p: ReceivedPatch) -> None:
-    """Paste patch_img onto canvas using p.bbox as the original location.
+    """Paste decoded patch into the canvas at its expanded bbox.
 
-    The patch image's actual size may differ from bbox (margin was added
-    on the edge side via expanded_bbox, but we only carry the original
-    bbox over the wire to save header space). We crop the patch back to
-    bbox size — this is a Day-6 simplification; Week 2 will pass
-    expanded_bbox over the wire too and paste with the margin.
+    Uses p.expanded_bbox when available (chunk 0 was received), otherwise
+    falls back to p.bbox. The None case occurs when chunk 0 is lost — this
+    is normal operation, not a degraded path, because chunk 0 also carries
+    the JPEG SOI marker, so a chunk-0 loss already means the patch cannot
+    decode. The fallback exists only to keep the canvas dimensions
+    consistent for downstream logging.
     """
     H, W = canvas.shape[:2]
 

@@ -35,6 +35,7 @@ from common.packet import (
     PATCH_META_PREFIX_SIZE,
 )
 
+from collections.abc import Callable
 
 PatchKey = Tuple[int, int]  # (frame_id, det_id)
 
@@ -139,6 +140,7 @@ class UDPReceiver:
         recv_buffer_bytes: int = 1 << 22,
         patch_ttl_s: float = 0.200,
         frame_ttl_s: float = 0.500,
+        packet_filter: Callable[[bytes], bytes | None] | None = None,
     ) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -169,6 +171,17 @@ class UDPReceiver:
                     break
                 time.sleep(0.0005)
                 continue
+            except OSError as e:
+            # Catch other socket errors (closed socket, network unreachable, etc.)
+            # so the receiver doesn't crash. Count them for diagnostics.
+                self.stats.recv_errors += 1
+                break
+
+            # Optional packet filter for constraint simulator (drop / delay / mutate)
+            if self._packet_filter is not None:
+                buf = self._packet_filter(buf)
+                if buf is None:
+                    continue  # simulated drop
 
             for event in self._ingest(buf):
                 yield event

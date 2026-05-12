@@ -57,7 +57,7 @@ def main() -> None:
     for i, d in enumerate(detections):
         print(
             f"          [{i}] class={d.class_id} conf={d.confidence:.3f} "
-            f"bbox=({d.x1},{d.y2},{d.x2},{d.y2})"
+            f"bbox=({d.x1},{d.y1},{d.x2},{d.y2})"
         )
 
     # ---------- Extract patches ----------

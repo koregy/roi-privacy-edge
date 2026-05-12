@@ -76,3 +76,18 @@ Note: clean Wi-Fi baseline shows zero natural loss, which means
 RQ4 (recovery layer) evaluation requires artificial loss injection.
 Plan for Week 4: tc netem on receiver's wlan interface, sweep
 loss rates 1% / 5% / 10% / 20% to characterize recovery behavior.
+
+## Week 1 milestone — end-to-end clip (Day 6)
+
+Source: data/videos/person-bicycle-car-detection.mp4 (768×432, 12 FPS, 647 frames)
+Run: 100 frames over 8.29 s, Jetson Orin Nano → Laptop, same-subnet Wi-Fi.
+
+- 100 / 100 frames complete (frames_partial_ttl = 0)
+- 0 packet errors on sender, 0 corrupted/duplicate on receiver
+- All 4-person frames decoded and stitched onto neutral grey canvas
+- Visual inspection: stitched mp4 faithful to source ROIs
+
+Wire-format additions: PKT_TYPE_FRAME_HEADER (5-byte payload =
+n_patches + frame_w + frame_h, sent once per frame, before chunks).
+Loopback test verifies byte-for-byte JPEG identity and correct
+FRAME complete events.
