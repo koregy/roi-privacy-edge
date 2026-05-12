@@ -3,6 +3,7 @@
 Day 5: yielded ReceivedPatch when each patch completed.
 Day 6: also yields ReceivedFrame when all expected patches for a
 frame_id arrive (per the FRAME_HEADER announcement).
+Week 2 prep: ReceivedPatch carries expanded_bbox (from chunk 0 prefix).
 
 Design notes
 ------------
@@ -49,6 +50,7 @@ class _PatchAssembly:
     chunks: List[Optional[bytes]] = field(default_factory=list)
     received_chunks: int = 0
     first_seen_s: float = 0.0
+    expanded_bbox: Optional[tuple[int, int, int, int]] = None
 
     def is_complete(self) -> bool:
         return self.received_chunks == self.chunk_count
@@ -194,18 +196,22 @@ class UDPReceiver:
             self.stats.packets_dropped_bad_header += 1
             return
 
-        #   payload = buf[HEADER_SIZE : HEADER_SIZE + hdr.payload_len]
-        #   if len(payload) != hdr.payload_len:
-        #       self.stats.packets_dropped_bad_payload += 1
-        #   return
-
         raw_payload = buf[HEADER_SIZE : HEADER_SIZE + hdr.payload_len]
         if len(raw_payload) != hdr.payload_len:
             self.stats.packets_dropped_bad_payload += 1
             return
 
-        # chunk 0 carries an 8-byte expanded_bbox prefix before JPEG bytes.
-        # chunks > 0 carry only JPEG bytes.
+        # Dispatch by packet type FIRST. Chunk-0 prefix only applies to PATCH_CHUNK,
+        # not FRAME_HEADER (whose payload is the 5-byte n_patches/w/h struct).
+        if hdr.pkt_type == PKT_TYPE_FRAME_HEADER:
+            self._handle_frame_header(hdr.frame_id, raw_payload)
+            yield from self._maybe_emit_frame(hdr.frame_id)
+            return
+        if hdr.pkt_type != PKT_TYPE_PATCH_CHUNK:
+            return
+
+        # PATCH_CHUNK only past this point.
+        # Chunk 0 carries an 8-byte expanded_bbox prefix; later chunks carry JPEG only.
         if hdr.chunk_idx == 0:
             try:
                 expanded_bbox = unpack_patch_meta_prefix(raw_payload)
@@ -217,16 +223,7 @@ class UDPReceiver:
             expanded_bbox = None
             payload = raw_payload
 
-        if hdr.pkt_type == PKT_TYPE_FRAME_HEADER:
-            self._handle_frame_header(hdr.frame_id, payload)
-            # Could complete a frame if its patches arrived first.
-            yield from self._maybe_emit_frame(hdr.frame_id)
-            return
-
-        if hdr.pkt_type != PKT_TYPE_PATCH_CHUNK:
-            return
-
-        rp = self._handle_chunk(hdr, payload)
+        rp = self._handle_chunk(hdr, payload, expanded_bbox)
         if rp is not None:
             yield rp
             self._attach_to_frame(rp)
@@ -255,7 +252,10 @@ class UDPReceiver:
             fr.frame_h = frame_h
 
     def _handle_chunk(
-        self, hdr: PacketHeader, payload: bytes
+        self,
+        hdr: PacketHeader,
+        payload: bytes,
+        expanded_bbox: Optional[tuple[int, int, int, int]],
     ) -> Optional[ReceivedPatch]:
         if hdr.chunk_idx >= hdr.chunk_count or hdr.chunk_count == 0:
             self.stats.packets_dropped_bad_payload += 1
@@ -283,6 +283,8 @@ class UDPReceiver:
             return None
 
         asm.chunks[hdr.chunk_idx] = payload
+        if hdr.chunk_idx == 0:
+            asm.expanded_bbox = expanded_bbox
         asm.received_chunks += 1
 
         if asm.is_complete():
@@ -349,6 +351,7 @@ class UDPReceiver:
             rp = ReceivedPatch(
                 frame_id=asm.frame_id, det_id=asm.det_id,
                 quality=asm.quality, bbox=asm.bbox,
+                expanded_bbox=asm.expanded_bbox,
                 confidence=asm.confidence,
                 data=asm.assemble(),
                 complete=False,
