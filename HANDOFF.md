@@ -6,9 +6,9 @@
 
 ## 프로젝트 개요
 
-**제목:** RoI-Based Privacy-Preserving Edge Streaming Pipeline
-**일정:** 3주 (May 9 – May 29, 2026)
-**마감:** May 29
+**제목:** RoI-Based Privacy-Preserving Edge Streaming Pipeline  
+**일정:** 3주 (May 9 – May 29, 2026)  
+**마감:** May 29  
 **계획서:** `ICT_Module4_Proposal_v2.docx`
 
 **구성:**
@@ -20,27 +20,47 @@
 
 ---
 
-## 현재 상태 (마지막 업데이트: Week 2 Day 1 시작 직전)
+## 현재 상태 (마지막 업데이트: Week 2 Day 2 시작 직전 - May 24)
 
-### Week 1 완료 (Day 1–6)
+### Week 1 완료 (Day 9–15)
 - Day 1–2: YOLOv8n FP16 TensorRT engine — 8.8MB, GPU compute 4.33ms, e2e 27.6ms
-- Day 3–4: patch extractor + JPEG encoder — 84KB/frame @ q=75, 4 persons
+- Day 3–4: patch extractor + JPEG encoder — 84KB/frame @ q=75
 - Day 5: UDP transport — 32B header + chunking, loopback 100 frames 0 loss
 - Day 6: FRAME_HEADER 패킷 + naive stitcher, 100 frames e2e (frames_complete=100/100)
 
-### Week 2 Day 0 완료 (May 12, 부채 정리)
-**부채 2번 (expanded_bbox wire 누락) 해결:**
-- D안 적용: chunk 0 payload 앞에 8B `expanded_bbox` prefix
-- packet.py / udp_sender.py / udp_receiver.py / stitcher / test_udp_loopback.py 수정
-- loopback 3 verify 블록 PASS, e2e 100 frames `bad_pay=0` 회귀 없음
-- 베이스라인 mp4 저장: `results/wk2_day0_expanded_bbox_baseline.mp4`
+### Week 2 Day 0 (May 12) — expanded_bbox wire prefix 처리
 
-### Week 2 남은 일정
-- Day 1–2: constraint simulator (drop/delay/noise + dashboard 슬라이더 preliminary)
-- Day 3–4: recovery layer (IoU tracker + zero-order hold + adjacent frame interpolation)
-- Day 5: adaptive JPEG quality controller (network state → quality, with hysteresis)
-- Day 6: decision logic (Normal/Warning/Emergency) + closed-loop feedback (server → edge)
-- Day 7: Stretch prep (ResNet18 dynamic shape ONNX, batch=1/4 검증)
+### Week 2 Day 1 (May 13) — 코드 리뷰 + packet_filter seam 추가
+
+### 11일 공백 (May 14–23)
+
+### Week 2 재시작 Day 0 (May 24 오전) — Week 1 e2e 재검증
+- 노트북 git pull, baseline 재실행: patches_complete=67, bad=0/0/0 ✅
+- 일정 압축: 3주 → 5월 29일까지 6일
+
+### Week 2 Day 1 완료 (May 24 오후) — Constraint Simulator (drop + delay)
+- 신규: `server/transport/constraint_sim.py`
+- 수정: `server/transport/__init__.py`, `scripts/run_server_stitch.py`
+- Noise는 scope cut (적응형 컨트롤러와 묶여서 6일 일정에 부담)
+- Test A (회귀, no flags): baseline 동일 ✅
+- Test B (drop 30%, seed=42): seen=219, dropped=75, fhdr=58/100, patches_c/i=39/20
+- Test C (delay 20-50ms): TTL(200ms) 내, 무손실, avg_delay=34.74ms
+- Test D (drop 15% + delay 10-30ms): ChainedFilter 순서 효과 검증 — delay filter의 seen=188 < drop filter의 seen=219, drop된 31 패킷이 sleep 절약
+
+### 압축 일정 (May 24 → 29, 6일)
+- Day 1 (5/24 토): constraint simulator ✅
+- Day 2 (5/25 일): IoU tracker + Zero-order Hold recovery
+- Day 3 (5/26 월): 결정 로직 (Normal/Warning/Emergency) + open-loop adaptive quality
+- Day 4 (5/27 화): 피드백 채널 시도 → 안 되면 open-loop 폴백 → Streamlit 셸
+- Day 5 (5/28 수): Streamlit 4패널 + 평가 실험
+- Day 6 (5/29 목): 평가 마무리 + 보고서 + 데모 영상 + 제출
+
+### Scope cuts (확정)
+- ❌ Noise 시뮬레이터
+- ❌ Option B (서버 동적 배치, ResNet18)
+- ❌ Adjacent-frame interpolation (Zero-order hold만)
+- ❌ MOT17 데이터셋
+- ⚠️ 폐쇄루프 피드백 — Day 4 정오까지 안 잡히면 open-loop 폴백
 
 ---
 
@@ -56,7 +76,7 @@ PROTOCOL_VERSION = 1
 
 PKT_TYPE_PATCH_CHUNK = 0
 PKT_TYPE_HEARTBEAT = 1   # reserved
-PKT_TYPE_FEEDBACK = 2    # reserved (server → edge)
+PKT_TYPE_FEEDBACK = 2    # reserved (server → edge, Week 2 Day 6)
 PKT_TYPE_FRAME_HEADER = 3
 
 MAX_UDP_PAYLOAD = 1400
@@ -104,6 +124,16 @@ def unpack_patch_meta_prefix(buf: bytes) -> tuple[int,int,int,int]
 def parse_frame_header_payload(payload) -> tuple[int,int,int]
 ```
 
+### `common/config.py` — 전체 상수
+
+```python
+PERSON_CLASS_ID = 0          # COCO class id for "person"
+MIN_PATCH_SIZE = 32          # skip patches smaller than this (pixels, either dim)
+BBOX_MARGIN = 0.10           # expand bbox by this fraction on each side before crop
+DEFAULT_JPEG_QUALITY = 75    # JPEG quality (1-100)
+MAX_PATCH_BYTES = 64 * 1024  # warn threshold for oversized patches
+```
+
 ### `edge/detector/yolov8_trt.py`
 
 ```python
@@ -114,8 +144,14 @@ class Detection:
     class_id: int
 
 class YOLOv8TRT:
-    def __init__(self, engine_path: str): ...
-    def detect(self, frame: np.ndarray) -> list[Detection]: ...
+    def __init__(
+        self,
+        engine_path: str | Path,
+        input_size: int = 640,
+        conf_threshold: float = 0.35,
+        iou_threshold: float = 0.5,
+    ) -> None: ...
+    def detect(self, image_bgr: np.ndarray, person_only: bool = True) -> List[Detection]: ...
 ```
 
 ### `edge/patch/extractor.py`
@@ -125,12 +161,20 @@ class YOLOv8TRT:
 class Patch:
     frame_id: int
     det_id: int
-    image: np.ndarray                             # cropped BGR uint8
+    image: np.ndarray                             # cropped BGR uint8, numpy view (not copy)
     original_bbox: tuple[int, int, int, int]     # detector output, pre-margin
     expanded_bbox: tuple[int, int, int, int]     # after margin + frame clip
     conf: float
+    # property: shape -> tuple[int, int]  (height, width)
 
-def extract_patches(frame, detections, frame_id) -> list[Patch]
+def extract_patches(
+    frame: np.ndarray,
+    detections: Sequence[Detection],
+    frame_id: int,
+    margin: float = BBOX_MARGIN,
+    min_size: int = MIN_PATCH_SIZE,
+    person_class_id: int = PERSON_CLASS_ID,
+) -> List[Patch]
 ```
 
 ### `edge/patch/jpeg_encoder.py`
@@ -145,10 +189,50 @@ class EncodedPatch:
     expanded_bbox: tuple[int, int, int, int]
     quality: int
     conf: float
+    # property: size_bytes -> int
 
 class PatchJPEGEncoder:
-    def __init__(self, default_quality: int = 75): ...
-    def encode_many(self, patches: list[Patch]) -> list[EncodedPatch]: ...
+    def __init__(self, default_quality: int = DEFAULT_JPEG_QUALITY) -> None: ...
+    def set_quality(self, quality: int) -> None: ...   # adaptive quality seam
+    def encode(self, patch: Patch, quality: int | None = None) -> EncodedPatch: ...
+    def encode_many(self, patches: Sequence[Patch], quality: int | None = None) -> List[EncodedPatch]: ...
+    def reset_stats(self) -> None: ...
+    # properties: quality, avg_bytes
+    # stats attrs: encoded_count, total_bytes_out, oversized_count
+```
+
+### `edge/transport/udp_sender.py`
+
+```python
+@dataclass
+class SendStats:
+    packets_sent: int = 0
+    bytes_sent: int = 0
+    patches_sent: int = 0
+    frames_sent: int = 0
+    send_errors: int = 0
+
+class UDPSender:
+    def __init__(
+        self,
+        server_host: str,
+        server_port: int,
+        send_buffer_bytes: int = 1 << 20,
+        per_chunk_sleep_us: float = 0.0,
+    ) -> None: ...
+    def send_frame(
+        self,
+        *,
+        frame_id: int,
+        encoded: Sequence[EncodedPatch],
+        frame_w: int,
+        frame_h: int,
+    ) -> int: ...   # returns total UDP packets sent (1 header + N chunks)
+    def send_patch(self, enc: EncodedPatch) -> int: ...   # returns chunks sent
+    def send_frame_header(self, *, frame_id, n_patches, frame_w, frame_h) -> bool: ...
+    def close(self) -> None: ...
+    # context manager: __enter__ / __exit__
+    # stats attr: stats: SendStats
 ```
 
 ### `server/transport/udp_receiver.py`
@@ -166,6 +250,7 @@ class ReceivedPatch:
     complete: bool
     chunks_received: int
     chunks_expected: int
+    # property: loss_ratio -> float
 
 @dataclass
 class ReceivedFrame:
@@ -178,20 +263,99 @@ class ReceivedFrame:
     complete: bool
     # properties: n_received, n_complete_patches
 
+@dataclass
+class ReceiveStats:
+    packets_received: int = 0
+    packets_dropped_bad_header: int = 0
+    packets_dropped_bad_payload: int = 0
+    duplicate_chunks: int = 0
+    patches_complete: int = 0
+    patches_incomplete_ttl: int = 0
+    bytes_received: int = 0
+    frame_headers_received: int = 0
+    frames_complete: int = 0
+    frames_partial_ttl: int = 0
+    orphan_patches: int = 0
+    recv_errors: int = 0      # non-blocking OSError on recvfrom
+
 class UDPReceiver:
     def __init__(
-        self, bind_host, bind_port,
+        self,
+        bind_host: str,
+        bind_port: int,
         recv_buffer_bytes: int = 1 << 22,
         patch_ttl_s: float = 0.200,
         frame_ttl_s: float = 0.500,
-    ): ...
-    def poll(self, timeout_s: float = 0.01) -> Iterator[object]: ...    # yields ReceivedPatch | ReceivedFrame
+        packet_filter: Callable[[bytes], bytes | None] | None = None,
+        # packet_filter: (buf) -> buf (pass-through) | None (drop)
+        # seam for Week 2 constraint simulator
+    ) -> None: ...
+    def poll(self, timeout_s: float = 0.01) -> Iterator[object]: ...   # yields ReceivedPatch | ReceivedFrame
     def flush(self) -> List[object]: ...
-    @property stats: ReceiveStats
+    def close(self) -> None: ...
+    # context manager: __enter__ / __exit__
+    # stats attr: stats: ReceiveStats
 ```
 
-**`ReceiveStats` 필드:**
-`packets_received`, `packets_dropped_bad_header`, `packets_dropped_bad_payload`, `duplicate_chunks`, `patches_complete`, `patches_incomplete_ttl`, `bytes_received`, `frame_headers_received`, `frames_complete`, `frames_partial_ttl`, `orphan_patches`
+### `server/stitcher/naive.py`
+
+```python
+@dataclass
+class StitchResult:
+    frame_id: int
+    image: np.ndarray         # BGR (H, W, 3) uint8
+    n_pasted: int             # successfully decoded + pasted patches
+    n_skipped_decode: int     # bytes present but cv2.imdecode failed
+    n_skipped_incomplete: int # patches marked incomplete (still attempted)
+
+def stitch_frame(
+    frame: ReceivedFrame,
+    *,
+    bg_value: int = DEFAULT_BG_VALUE,       # 128 (mid-grey)
+    draw_bbox: bool = False,
+    fallback_size: tuple[int, int] = DEFAULT_FALLBACK_SIZE,   # (720, 1280)
+) -> StitchResult
+```
+
+`_paste` 동작: `expanded_bbox`가 있으면 그것을 사용, None이면 `original_bbox` fallback (chunk 0 손실 케이스). 두 경우 모두 patch_img를 bbox 크기로 resize해서 paste.
+
+### `server/transport/constraint_sim.py` (Week 2 Day 1 추가)
+
+```python
+@dataclass
+class FilterStats:
+    seen: int = 0
+    dropped: int = 0
+    delayed: int = 0
+    total_delay_ms: float = 0.0
+    # properties: drop_rate, avg_delay_ms
+
+class RandomDropFilter:
+    def __init__(self, p: float, seed: Optional[int] = None) -> None: ...
+    def __call__(self, buf: bytes) -> Optional[bytes]: ...  # None = drop
+    # attrs: p, stats: FilterStats
+
+class DelayJitterFilter:
+    def __init__(self, min_ms: float, max_ms: float, seed: Optional[int] = None) -> None: ...
+    def __call__(self, buf: bytes) -> bytes: ...  # never None
+    # attrs: min_ms, max_ms, stats: FilterStats
+
+class ChainedFilter:
+    def __init__(self, *filters: Callable[[bytes], Optional[bytes]]) -> None: ...
+    def __call__(self, buf: bytes) -> Optional[bytes]: ...
+    # attrs: filters (tuple)
+
+def build_filter(
+    *,
+    drop_prob: float = 0.0,
+    delay_min_ms: float = 0.0,
+    delay_max_ms: float = 0.0,
+    seed: Optional[int] = None,
+) -> Optional[Callable[[bytes], Optional[bytes]]]: ...
+```
+
+CLI 인자 (`run_server_stitch.py`): `--drop-prob`, `--delay-min-ms`, `--delay-max-ms`, `--sim-seed`.
+[final] 출력 후 `[sim]` prefix로 filter stats 출력 (filter 비활성 시 무출력).
 
 ---
 
@@ -201,37 +365,43 @@ class UDPReceiver:
 roi-privacy-edge/
 ├── common/
 │   ├── packet.py             # wire format, struct pack/unpack, build_packets, build_frame_header_packet
-│   └── config.py             # DEFAULT_JPEG_QUALITY 등
+│   └── config.py             # PERSON_CLASS_ID, BBOX_MARGIN, MIN_PATCH_SIZE, DEFAULT_JPEG_QUALITY, MAX_PATCH_BYTES
 ├── edge/
 │   ├── detector/
 │   │   └── yolov8_trt.py     # YOLOv8TRT class, Detection dataclass
 │   ├── patch/
-│   │   ├── __init__.py       # exports PatchJPEGEncoder, extract_patches
+│   │   ├── __init__.py       # exports Patch, extract_patches, EncodedPatch, PatchJPEGEncoder, encode_patch
 │   │   ├── extractor.py      # extract_patches(), Patch dataclass
-│   │   └── jpeg_encoder.py   # PatchJPEGEncoder, EncodedPatch dataclass
+│   │   └── jpeg_encoder.py   # PatchJPEGEncoder, EncodedPatch dataclass, encode_patch
 │   └── transport/
-│       ├── __init__.py       # exports UDPSender
+│       ├── __init__.py       # exports UDPSender, SendStats
 │       └── udp_sender.py     # UDPSender class, send_frame method
 ├── server/
 │   ├── transport/
-│   │   ├── __init__.py       # exports UDPReceiver, ReceivedPatch, ReceivedFrame
-│   │   └── udp_receiver.py   # UDPReceiver class, reassembly, TTL sweeps
+│   │   ├── __init__.py       # exports UDPReceiver, ReceivedPatch, ReceivedFrame, ReceiveStats
+│   │   └── udp_receiver.py   # UDPReceiver class, reassembly, TTL sweeps, packet_filter seam
 │   └── stitcher/
-│       ├── __init__.py       # exports stitch_frame, StitchResult
-│       └── naive.py          # stitch_frame(rf, draw_bbox=False) -> StitchResult
+│       ├── __init__.py       # exports stitch_frame, StitchResult, DEFAULT_BG_VALUE
+│       └── naive.py          # stitch_frame(frame, *, bg_value, draw_bbox, fallback_size) -> StitchResult
 ├── scripts/
-│   ├── test_patch_pipeline.py     # extractor + encoder smoke test
-│   ├── test_udp_loopback.py       # 127.0.0.1 e2e, 3 verify blocks
 │   ├── run_edge_video.py          # edge sender (args: --server --port --source --engine --quality --max-frames --target-fps --sleep-us --log-every)
-│   └── run_server_stitch.py       # server receiver + stitcher (args: --bind --port --output --png-dir --fps --draw-bbox --idle-timeout --ttl-ms)
+│   ├── run_server_stitch.py       # server receiver + stitcher (args: --bind --port --output --png-dir --fps --draw-bbox --idle-timeout --ttl-ms)
+│   ├── test_patch_pipeline.py     # extractor + encoder smoke test + quality sweep CSV
+│   ├── test_udp_loopback.py       # 127.0.0.1 e2e, 3 verify blocks (JPEG / FRAME_HEADER / bbox roundtrip)
+│   └── legacy/                    # Day 5 prototype scripts, not maintained
+│       ├── README.md              # "deprecated" 경고 + D1 버그 고지
+│       ├── run_edge_send.py       # single-shot edge sender (TypeError at send_frame call — do not use)
+│       ├── run_server_recv.py     # single-shot server receiver
+│       └── test_inference.py      # YOLOv8TRT standalone smoke test
 ├── engines/
 │   └── yolov8n_fp16.engine        # TRT engine, 8.8MB, built on Jetson
 ├── data/
 │   ├── test_images/persons.jpg
 │   └── videos/person-bicycle-car-detection.mp4   # 768x432 12fps
-└── results/
-    ├── stitched.mp4                              # latest e2e output (overwritten each run)
-    └── wk2_day0_expanded_bbox_baseline.mp4       # baseline (loss=0, normal)
+├── results/
+│   ├── stitched.mp4                              # latest e2e output (overwritten each run)
+│   └── wk2_day0_expanded_bbox_baseline.mp4       # baseline (loss=0, normal)
+└── REVIEW.md                                     # Week 1 코드 리뷰 (Phase 1-3)
 ```
 
 ---
@@ -242,7 +412,7 @@ roi-privacy-edge/
 - 들여쓰기: **스페이스 4칸**, 탭 금지
 - 네이밍: `snake_case` (함수/변수), `PascalCase` (클래스)
 - Type hints: `tuple[int, int, int, int]` (소문자, Python 3.9+ 스타일), `Optional` import 사용 OK
-- Import: from-imports 그룹별 정렬 (stdlib → third-party → local)
+- Import 순서: stdlib → third-party → local. (`collections.abc` 등 stdlib은 반드시 local import 앞에)
 - 실행: `cd ~/roi-privacy-edge && PYTHONPATH=. python -u scripts/...`
 - Jetson에는 TensorRT + cuda Python bindings 있음, 노트북엔 둘 다 없음 → detector 호출은 Jetson에서만 가능
 
@@ -250,11 +420,45 @@ roi-privacy-edge/
 
 ## 알려진 부채 / 추후 정리할 것들
 
-1. **SIGINT 처리 (run_server_stitch.py)** — 가끔 [final] 줄 안 찍힘. 현재 코드에 `signal.signal` + `_running` flag + `flush()` + `[final]` 다 있어서 명확한 재현 케이스 없으면 미루는 중. constraint simulator 돌리다가 재현되면 그때 잡기.
-2. ~~expanded_bbox wire 누락~~ — **Week 2 Day 0에 해결 완료**.
-3. **quality sweep CSV plot 미생성** — Week 3 평가 단계에서 일괄.
+1. **SIGINT 처리 (run_server_stitch.py)** — 가끔 [final] 줄 안 찍힘. `signal.signal` + `_running` flag + `flush()` 다 있어서 명확한 재현 케이스 없으면 미루는 중. constraint simulator 돌리다가 재현되면 그때 잡기.
+2. ~~expanded_bbox wire 누락~~ — Week 2 Day 0에 해결 완료.
+3. **quality sweep CSV plot 미생성** — `results/patch_sizes.csv`는 생성됨. matplotlib으로 bytes-vs-quality 커브 1장 추가 필요. Week 3 평가 단계에서 일괄.
 4. **MOT17 다운 실패** (motchallenge.net 차단) — person-bicycle-car-detection.mp4로 충분히 굴러가는 중. Week 2 끝나고 데이터셋 다양성 필요해지면 다시.
-5. **VideoWriterLazy 자동 백업** — `results/stitched.mp4`가 매번 덮어써짐. 의미 있는 이름으로 명시적 저장하거나 스크립트에 백업 로직 추가 고려.
+5. **VideoWriterLazy 자동 백업 없음** — `results/stitched.mp4`가 매번 덮어써짐. 의미 있는 이름으로 명시적 저장하거나 스크립트에 백업 로직 추가 고려.
+6. **`test_patch_pipeline.py:60` 로그 오타** — `f"bbox=({d.x1},{d.y2},{d.x2},{d.y2})"` 에서 두 번째 좌표가 `d.y1` 이어야 함. 로그만 틀리고 기능 무영향.
+7. **`cv2.imwrite` 반환값 미확인 (`run_server_stitch.py:211`)** — `--png-dir` 사용 시 디스크 풀·경로 오류가 조용히 실패. `ok = cv2.imwrite(...); if not ok: warn` 형태로 수정 권장.
+8. **TRT/CUDA 오류에 `assert` 사용 (`yolov8_trt.py`)** — 7개. `python -O` 시 비활성화. `raise RuntimeError(...)` 교체 권장. Jetson 직접 실행 시 `-O` 안 쓰므로 당장 급하진 않음.
+9. **delay만으로는 손실 발생 안 함** — TTL(patch=200ms, frame=500ms) 안쪽 delay는 무손실. 평가에서 delay 효과 보려면 100~200ms 범위 필요. Day 5 평가 단계에서 결정.
+10. **FRAME_HEADER 손실의 cascade 효과** — FRAME_HEADER가 drop되면 그 프레임 전체가 mp4에서 사라짐 (패치 도착했어도). 평가 시 frame loss 과대평가 가능. 해결책: (a) FRAME_HEADER duplicate 전송 또는 (b) 첫 PATCH_CHUNK에 frame meta prefix 추가. Day 5 평가 시 영향 보고 결정.
+
+---
+
+## Week 2 인터페이스 설계 메모
+
+### constraint simulator (Day 1-2)
+`UDPReceiver.__init__`의 `packet_filter` 파라미터 사용:
+```python
+def drop_10pct(buf: bytes) -> bytes | None:
+    return None if random.random() < 0.10 else buf
+
+rx = UDPReceiver(host, port, packet_filter=drop_10pct)
+```
+`packet_filter`가 `None`을 반환하면 해당 패킷 drop, bytes를 반환하면 변형된 패킷으로 처리.
+
+### recovery layer (Day 3-4)
+`run_server_stitch.py:_handle_frame()`에 1줄 삽입:
+```python
+def _handle_frame(rf, writer, png_dir, draw_bbox):
+    rf = recovery.enhance(rf)      # 여기 추가
+    res = stitch_frame(rf, draw_bbox=draw_bbox)
+```
+`RecoveryLayer.enhance(rf: ReceivedFrame) -> ReceivedFrame` 인터페이스. `rf.patches`가 mutable list이므로 incomplete patch를 이전 frame 데이터로 교체 가능.
+
+### adaptive quality (Day 5)
+`PatchJPEGEncoder.set_quality(new_q)` seam이 준비됨. feedback transport(server → edge recv socket) 신설 필요.
+
+### closed-loop feedback (Day 6)
+`PKT_TYPE_FEEDBACK = 2` 상수 예약됨. payload format 미정의 → `packet.py`에 `FEEDBACK_PAYLOAD_FORMAT` 추가 필요.
 
 ---
 
@@ -264,7 +468,7 @@ roi-privacy-edge/
 2. 그 다음 줄에 작업 요청 (예: "Week 2 Day 1 시작하자. constraint simulator 들어가자.")
 3. 작업 중 파일 수정이 필요하면 **해당 파일의 관련 부분을 직접 보여주기** — Claude가 추측하면 변수명 틀리고 시간 낭비됨. grep + sed로 빠르게 발췌:
    ```bash
-   grep -n "class\|@dataclass" path/to/file.py
+   grep -n "class\|@dataclass\|def " path/to/file.py
    sed -n '40,60p' path/to/file.py
    ```
 4. 변경 후엔 항상 syntax check + 가능하면 단위 테스트로 빠른 검증
@@ -273,20 +477,6 @@ roi-privacy-edge/
 
 ## TODO before next chat
 
-- [ ] git commit + push (부채 2번 변경)
-- [ ] 노트북에 git pull
-- [ ] 이 HANDOFF.md를 `docs/HANDOFF.md` 또는 repo root에 저장
-- [ ] (선택) HANDOFF.md를 README에서 링크하거나 .git/ 옆에 두기
-
----
-
-## 검증되지 않은 / 추측 포함 부분
-
-다음 항목들은 이 채팅 컨텍스트에 실제 코드가 안 보였어서 추측 포함. 새 채팅 들어가기 전에 본인이 확인하고 수정 권장:
-
-- **`UDPSender` 클래스의 정확한 메서드 시그니처** — `send_frame(frame_id, encoded, frame_w, frame_h)` 호출 패턴은 확인됨. 내부 메서드는 모름.
-- **`stitch_frame()` 시그니처와 `StitchResult` dataclass 필드** — `stitch_frame(rf, draw_bbox=False) -> StitchResult`, `res.image`, `res.n_pasted` 사용 확인됨. 그 외는 모름.
-- **`Detection` dataclass 정확한 필드** — `x1,y1,x2,y2,confidence,class_id`로 추정 (Week 1 시작 메시지 기반).
-- **`common/config.py` 다른 상수들** — `DEFAULT_JPEG_QUALITY` 외엔 모름.
-
-이 부분 채워서 v2 HANDOFF로 업데이트해두면 다음 채팅이 더 편해짐.
+- [x] git commit + push (Day 0 + Day 1 변경사항 일괄) ← May 13에 완료됨
+- [x] 노트북에 git pull  ← May 24에 완료
+- [ ] Week 2 Day 2: IoU tracker + Zero-order Hold recovery 구현
