@@ -81,7 +81,7 @@
 | H | recovery+reorder, redund=1 | 58 | **tracks=1** (reorder가 ID 일관성 회복) |
 | J | drop 0, redund=3 | 100 | dedup 검증 (수정 전 166 → 수정 후 100) |
 | **I** | **drop 30, recovery+reorder+redund=3** | **97** | **recovered=24, tracks=1** |
-| K | I와 동일, recovery off | 97 (예정) | 시각 비교용 |
+| K | I와 동일, recovery off | 97 | 모든 stats Test I와 동일, [recov] 없음, ZoH 시각 효과 isolation |
 
 #### 핵심 성과 (Test I)
 - `mp4 frames written: 97/100` — FRAME_HEADER cascade 해소 (이론값 0.3³ = 0.027 → 97.3 frame 살아남음)
