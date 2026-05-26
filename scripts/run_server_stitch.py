@@ -31,6 +31,8 @@ from server.transport import (
 )
 from server.transport.reorder import ReorderBuffer
 from server.recovery import IoUTracker, RecoveryLayer
+from server.decision import DecisionStateMachine, DecisionState
+from server.control import PIDAdaptiveController
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -147,6 +149,34 @@ def main() -> None:
         "--reorder-wait-ms", type=float, default=500.0,
         help="Max time a frame waits in reorder buffer (default 500ms).",
     )
+    ap.add_argument(
+        "--decision", action="store_true",
+        help="Enable confidence-weighted decision state machine.",
+    )
+    ap.add_argument(
+        "--decision-window", type=int, default=10,
+        help="Sliding window size in frames (default 10).",
+    )
+    ap.add_argument(
+        "--decision-warn", type=float, default=0.80,
+        help="Normal->Warning threshold on patch reception ratio (default 0.80).",
+    )
+    ap.add_argument(
+        "--decision-emerg", type=float, default=0.50,
+        help="Warning->Emergency threshold on patch reception ratio (default 0.50).",
+    )
+    ap.add_argument(
+        "--adaptive", action="store_true",
+        help="Enable PI adaptive quality controller (requires --decision).",
+    )
+    ap.add_argument(
+        "--adaptive-target", type=float, default=0.85,
+        help="Target reception ratio for adaptive controller (default 0.85).",
+    )
+    ap.add_argument(
+        "--adaptive-initial-q", type=int, default=75,
+        help="Initial JPEG quality for adaptive controller (default 75).",
+    )
     args = ap.parse_args()
 
     out_path = Path(args.output)
@@ -194,6 +224,25 @@ def main() -> None:
             max_size=args.reorder_size,
             max_wait_s=args.reorder_wait_ms / 1000.0,
         )
+    
+    state_machine: Optional[DecisionStateMachine] = None
+    if args.decision:
+        state_machine = DecisionStateMachine(
+            window_size=args.decision_window,
+            warn_threshold=args.decision_warn,
+            emerg_threshold=args.decision_emerg,
+        )
+
+    adaptive: Optional[PIDAdaptiveController] = None
+    if args.adaptive:
+        if state_machine is None:
+            raise SystemExit("--adaptive requires --decision")
+        adaptive = PIDAdaptiveController(
+            target_ratio=args.adaptive_target,
+            initial_quality=args.adaptive_initial_q,
+        )
+
+    current_state = DecisionState.NORMAL
 
     with UDPReceiver(
         args.bind, args.port,
@@ -216,9 +265,12 @@ def main() -> None:
                     else:
                         emitted = [event]
                     for ev in emitted:
-                        if recovery is not None:
-                            ev = recovery.enhance(ev)
-                        _handle_frame(ev, writer, png_dir, args.draw_bbox)
+                        current_state, _ = _process_frame(
+                            ev,
+                            state_machine=state_machine, adaptive=adaptive,
+                            recovery=recovery, writer=writer, png_dir=png_dir,
+                            draw_bbox=args.draw_bbox, prev_state=current_state,
+                        )
                         frames_done += 1
                     last_frame_t = time.perf_counter()
 
@@ -254,17 +306,23 @@ def main() -> None:
                 else:
                     emitted = [event]
                 for ev in emitted:
-                    if recovery is not None:
-                        ev = recovery.enhance(ev)
-                    _handle_frame(ev, writer, png_dir, args.draw_bbox)
+                    current_state, _ = _process_frame(
+                        ev,
+                        state_machine=state_machine, adaptive=adaptive,
+                        recovery=recovery, writer=writer, png_dir=png_dir,
+                        draw_bbox=args.draw_bbox, prev_state=current_state,
+                    )
                     frames_done += 1
 
         # Drain reorder buffer.
         if reorder is not None:
             for ev in reorder.flush():
-                if recovery is not None:
-                    ev = recovery.enhance(ev)
-                _handle_frame(ev, writer, png_dir, args.draw_bbox)
+                current_state, _ = _process_frame(
+                    ev,
+                    state_machine=state_machine, adaptive=adaptive,
+                    recovery=recovery, writer=writer, png_dir=png_dir,
+                    draw_bbox=args.draw_bbox, prev_state=current_state,
+                )
                 frames_done += 1
 
     writer.close()
@@ -331,6 +389,27 @@ def main() -> None:
             f"ooo_at_emit={rb.out_of_order_at_emit}"
         )
 
+    if state_machine is not None:
+        s = state_machine.stats
+        total = s.frames_normal + s.frames_warning + s.frames_emergency
+        print()
+        print(
+            f"[state]   total={total} "
+            f"normal={s.frames_normal} ({100*s.frames_normal/total:.1f}%) "
+            f"warning={s.frames_warning} ({100*s.frames_warning/total:.1f}%) "
+            f"emergency={s.frames_emergency} ({100*s.frames_emergency/total:.1f}%) "
+            f"transitions={s.transitions}"
+        )
+
+    if adaptive is not None:
+        s = adaptive.stats
+        avg_q = sum(s.quality_history) / len(s.quality_history) if s.quality_history else 0
+        print(
+            f"[ctrl]    updates={s.updates} "
+            f"q_range=[{s.quality_min_seen}, {s.quality_max_seen}] "
+            f"q_avg={avg_q:.1f} q_final={adaptive.quality}"
+        )
+
     sys.exit(0)
 
 def _handle_frame(
@@ -352,6 +431,40 @@ def _handle_frame(
     if png_dir is not None:
         out = png_dir / f"frame_{rf.frame_id:06d}.png"
         cv2.imwrite(str(out), res.image)
+
+def _process_frame(
+    ev,
+    *,
+    state_machine,
+    adaptive,
+    recovery,
+    writer,
+    png_dir,
+    draw_bbox,
+    prev_state,
+):
+    """One frame: decision -> adaptive -> recovery -> stitch -> writer.
+
+    Returns (new_state, current_quality) for logging.
+    """
+    state = prev_state
+    quality = None
+    if state_machine is not None:
+        state = state_machine.update(ev)
+        if adaptive is not None:
+            quality = adaptive.update(state_machine.current_ratio)
+        if state != prev_state:
+            print(
+                f"[state]   frame={ev.frame_id} {prev_state.value} -> {state.value} "
+                f"(ratio={state_machine.current_ratio:.3f}"
+                + (f", q={quality}" if quality is not None else "")
+                + ")",
+                flush=True,
+            )
+    if recovery is not None:
+        ev = recovery.enhance(ev)
+    _handle_frame(ev, writer, png_dir, draw_bbox)
+    return state, quality    
 
 
 if __name__ == "__main__":

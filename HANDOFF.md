@@ -100,6 +100,47 @@
 - 인코딩: `--fps 12` (송신 fps와 일치)
 - RQ4 시연: ZoH 복구 + 빨간 테두리 시각화 + Day 3 PID adaptive 통합
 
+### Week 2 Day 3 완료 (May 25) — Decision Logic + PI Adaptive Controller
+
+#### 신규 파일
+- `server/decision/state_machine.py` — Confidence-weighted 3-state machine (Normal/Warning/Emergency) with sliding window + hysteresis
+- `server/decision/__init__.py`
+- `server/control/adaptive.py` — PI feedback controller with anti-windup (kp=30, ki=5, target_ratio=0.85)
+- `server/control/__init__.py`
+
+#### 수정 파일
+- `scripts/run_server_stitch.py`
+  - `_process_frame` helper로 wire-up 통일 (3군데 호출 경로 — main poll, rx.flush, reorder.flush)
+  - CLI: `--decision`, `--decision-window` (10), `--decision-warn` (0.80), `--decision-emerg` (0.50), `--adaptive`, `--adaptive-target` (0.85), `--adaptive-initial-q` (75)
+  - State transition log, [state] [ctrl] final stats
+
+#### RQ4 통합 (옵션 2 + 4)
+- 옵션 2: Confidence-weighted ratio (검출 confidence로 가중). RQ4의 thresholding/filtering 카테고리 강화.
+- 옵션 4: PI feedback control (단순 lookup table 대신). Anti-windup으로 saturation 방지.
+
+#### 검증 결과 (sim_seed=42, redundancy=3, fps=12)
+
+| Test | Drop | mp4/100 | Normal% | Warning% | Emergency% | q_range | q_avg |
+|------|------|------|------|------|------|------|------|
+| A | 0% | 100 | — | — | — | — | — |
+| L | 0% (decision+adaptive) | 100 | 100% | 0 | 0 | [80,95] | 94.5 |
+| M | 15% | 100 | 85% | 15% | 0 | [80,95] | 94.5 |
+| N | 30% | 97 | 44% | 49% | **7%** | **[30,95]** | **52.3** |
+| O | 50% | 89 | 52% | 35% | 13% | [30,95] | 51.9 |
+
+#### 핵심 성과
+- Drop 0~50%에서 monotonic state progression
+- PI controller가 drop 30%에서 quality 30까지 dynamic 적응
+- transitions 6~10회 (hysteresis로 떨림 방지)
+- Test N: 데모 영상 후보 (recovery 24 + adaptive quality + 3-state 시연)
+
+#### 발견된 부채 → fix됨
+- 4 frame 미스매치 ([state] total < frames_stitched): rx.flush + reorder.flush 두 경로가 `_process_frame` 헬퍼 안 거치고 직접 `_handle_frame` 호출. 두 군데 패치로 해결.
+
+#### Day 4 준비 사항
+- Adaptive controller가 quality 계산만 함. 엣지에 전달은 Day 4 (피드백 채널 또는 open-loop fallback).
+- Streamlit 셸 시작 (Day 4 오후).
+
 ### 압축 일정 (May 24 → 29, 6일)
 - Day 1 (5/24 토): constraint simulator ✅
 - Day 2 (5/24 늦은 오후~밤): IoU tracker + ZoH recovery + reorder buffer + FRAME_HEADER redundancy + dedup ✅
