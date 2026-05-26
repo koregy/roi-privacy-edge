@@ -107,18 +107,33 @@ class UDPSender:
         encoded: Sequence[EncodedPatch],
         frame_w: int,
         frame_h: int,
+        header_redundancy: int = 1,
     ) -> int:
         """Send a full frame: FRAME_HEADER + all patch chunks.
 
-        Returns total UDP packets sent (1 header + N chunks).
+        Parameters
+        ----------
+        header_redundancy : int, default 1
+            Send the FRAME_HEADER packet this many times. The packet is
+            identical each time, and the receiver treats duplicate
+            FRAME_HEADERs idempotently (same expected_patches value).
+            Use >1 to protect against single-packet loss cascading into
+            full frame loss. Cost: header_redundancy - 1 extra UDP
+            packets per frame.
+
+        Returns total UDP packets sent (header_redundancy headers + N chunks).
         """
+        if header_redundancy < 1:
+            raise ValueError(f"header_redundancy must be >= 1, got {header_redundancy}")
+
         sent = 0
-        if self.send_frame_header(
-            frame_id=frame_id,
-            n_patches=len(encoded),
-            frame_w=frame_w, frame_h=frame_h,
-        ):
-            sent += 1
+        for _ in range(header_redundancy):
+            if self.send_frame_header(
+                frame_id=frame_id,
+                n_patches=len(encoded),
+                frame_w=frame_w, frame_h=frame_h,
+            ):
+                sent += 1
         for enc in encoded:
             sent += self.send_patch(enc)
         self.stats.frames_sent += 1

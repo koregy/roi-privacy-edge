@@ -80,6 +80,12 @@ def main() -> None:
     ap.add_argument("--engine", default=str(DEFAULT_ENGINE))
     ap.add_argument("--quality", type=int, default=DEFAULT_JPEG_QUALITY)
     ap.add_argument(
+        "--header-redundancy", type=int, default=1,
+        help="Send each FRAME_HEADER N times (default 1 = no redundancy, "
+             "3 recommended for high-loss demos to mitigate frame-level "
+             "cascade from single-packet header loss).",
+    )
+    ap.add_argument(
         "--max-frames", type=int, default=0,
         help="Stop after N frames (0 = process all).",
     )
@@ -145,7 +151,7 @@ def main() -> None:
             t0 = time.perf_counter()
             tx.send_frame(
                 frame_id=fid, encoded=encoded,
-                frame_w=w, frame_h=h,
+                frame_w=w, frame_h=h, header_redundancy=args.header_redundancy
             )
             send_ms = (time.perf_counter() - t0) * 1000.0
 
