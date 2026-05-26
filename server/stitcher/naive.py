@@ -96,7 +96,12 @@ def stitch_frame(
         n_pasted += 1
         if draw_bbox:
             x1, y1, x2, y2 = p.bbox
-            colour = (0, 255, 0) if p.complete else (0, 165, 255)
+            if p.recovered:
+                colour = (0, 0, 255)         # BGR red — recovered from prior frame
+            elif p.complete:
+                colour = (0, 255, 0)         # BGR green — complete original
+            else:
+                colour = (0, 165, 255)       # BGR orange — incomplete, no recovery
             cv2.rectangle(canvas, (x1, y1), (x2, y2), colour, 2)
 
     return StitchResult(

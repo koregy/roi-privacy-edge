@@ -23,7 +23,14 @@ from typing import Optional
 import cv2
 
 from server.stitcher import StitchResult, stitch_frame
-from server.transport import ReceivedFrame, ReceivedPatch, UDPReceiver
+from server.transport import (
+    ReceivedFrame, 
+    ReceivedPatch, 
+    UDPReceiver,
+    build_filter,
+)
+from server.transport.reorder import ReorderBuffer
+from server.recovery import IoUTracker, RecoveryLayer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -100,6 +107,46 @@ def main() -> None:
         help="Exit after this many seconds with no new frames. 0 = never (Ctrl+C only).",
     )
     ap.add_argument("--ttl-ms", type=float, default=500.0)
+    ap.add_argument(
+        "--drop-prob", type=float, default=0.0,
+        help="Random chunk drop probability in [0, 1]. 0 = no drop.",
+    )
+    ap.add_argument(
+        "--delay-min-ms", type=float, default=0.0,
+        help="Minimum per-chunk delay in ms (used with --delay-max-ms).",
+    )
+    ap.add_argument(
+        "--delay-max-ms", type=float, default=0.0,
+        help="Maximum per-chunk delay in ms. 0 = no delay.",
+    )
+    ap.add_argument(
+        "--sim-seed", type=int, default=None,
+        help="RNG seed for reproducible drop/delay across runs.",
+    )
+    ap.add_argument(
+        "--recovery", action="store_true",
+        help="Enable Zero-order Hold recovery via IoU tracking.",
+    )
+    ap.add_argument(
+        "--recovery-iou", type=float, default=0.3,
+        help="IoU threshold for tracker (default 0.3).",
+    )
+    ap.add_argument(
+        "--recovery-max-age", type=int, default=10,
+        help="Max frames a track lives without a match (default 10).",
+    )
+    ap.add_argument(
+        "--reorder", action="store_true",
+        help="Reorder ReceivedFrame events by frame_id before stitching.",
+    )
+    ap.add_argument(
+        "--reorder-size", type=int, default=5,
+        help="Reorder buffer size in frames (default 5, adds ~5/fps seconds latency).",
+    )
+    ap.add_argument(
+        "--reorder-wait-ms", type=float, default=500.0,
+        help="Max time a frame waits in reorder buffer (default 500ms).",
+    )
     args = ap.parse_args()
 
     out_path = Path(args.output)
@@ -125,10 +172,34 @@ def main() -> None:
     patches_complete = 0
     patches_incomplete = 0
 
+    packet_filter = build_filter(
+        drop_prob=args.drop_prob,
+        delay_min_ms=args.delay_min_ms,
+        delay_max_ms=args.delay_max_ms,
+        seed=args.sim_seed,
+    )
+
+    recovery: Optional[RecoveryLayer] = None
+    if args.recovery:
+        recovery = RecoveryLayer(
+            IoUTracker(
+                iou_threshold=args.recovery_iou,
+                max_age=args.recovery_max_age,
+            )
+        )
+    
+    reorder: Optional[ReorderBuffer] = None
+    if args.reorder:
+        reorder = ReorderBuffer(
+            max_size=args.reorder_size,
+            max_wait_s=args.reorder_wait_ms / 1000.0,
+        )
+
     with UDPReceiver(
         args.bind, args.port,
-        patch_ttl_s=args.ttl_ms / 1000.0 * 0.4,  # patch TTL < frame TTL
+        patch_ttl_s=args.ttl_ms / 1000.0 * 0.4,
         frame_ttl_s=args.ttl_ms / 1000.0,
+        packet_filter=packet_filter,
     ) as rx:
         while _running:
             for event in rx.poll(timeout_s=0.05):
@@ -138,8 +209,17 @@ def main() -> None:
                     else:
                         patches_incomplete += 1
                 elif isinstance(event, ReceivedFrame):
-                    _handle_frame(event, writer, png_dir, args.draw_bbox)
-                    frames_done += 1
+                    # Reorder first (if enabled), then recovery+stitch each
+                    # emitted frame in order.
+                    if reorder is not None:
+                        emitted = reorder.push(event)
+                    else:
+                        emitted = [event]
+                    for ev in emitted:
+                        if recovery is not None:
+                            ev = recovery.enhance(ev)
+                        _handle_frame(ev, writer, png_dir, args.draw_bbox)
+                        frames_done += 1
                     last_frame_t = time.perf_counter()
 
             # Idle timeout: exit if nothing's arrived in a while.
@@ -169,7 +249,22 @@ def main() -> None:
         # Flush at shutdown.
         for event in rx.flush():
             if isinstance(event, ReceivedFrame):
-                _handle_frame(event, writer, png_dir, args.draw_bbox)
+                if reorder is not None:
+                    emitted = reorder.push(event)
+                else:
+                    emitted = [event]
+                for ev in emitted:
+                    if recovery is not None:
+                        ev = recovery.enhance(ev)
+                    _handle_frame(ev, writer, png_dir, args.draw_bbox)
+                    frames_done += 1
+
+        # Drain reorder buffer.
+        if reorder is not None:
+            for ev in reorder.flush():
+                if recovery is not None:
+                    ev = recovery.enhance(ev)
+                _handle_frame(ev, writer, png_dir, args.draw_bbox)
                 frames_done += 1
 
     writer.close()
@@ -187,8 +282,56 @@ def main() -> None:
           f"bad_pay={s.packets_dropped_bad_payload} "
           f"dup={s.duplicate_chunks}")
     print(f"          mp4 frames written: {writer.frames_written}")
-    sys.exit(0)
+    
+    # Constraint simulator stats (only when active).
+    if packet_filter is not None:
+        from server.transport.constraint_sim import (
+            ChainedFilter, RandomDropFilter, DelayJitterFilter,
+        )
+        filters_to_report = (
+            packet_filter.filters
+            if isinstance(packet_filter, ChainedFilter)
+            else (packet_filter,)
+        )
+        print()
+        for f in filters_to_report:
+            if isinstance(f, RandomDropFilter):
+                print(
+                    f"[sim]     RandomDropFilter p={f.p:.2f} "
+                    f"seen={f.stats.seen} dropped={f.stats.dropped} "
+                    f"drop_rate={f.stats.drop_rate:.3f}"
+                )
+            elif isinstance(f, DelayJitterFilter):
+                print(
+                    f"[sim]     DelayJitterFilter [{f.min_ms:.1f}, {f.max_ms:.1f}]ms "
+                    f"seen={f.stats.seen} delayed={f.stats.delayed} "
+                    f"avg_delay={f.stats.avg_delay_ms:.2f}ms"
+                )
 
+    if recovery is not None:
+        rs = recovery.stats
+        ts = recovery.tracker.stats
+        print()
+        print(
+            f"[recov]   frames={rs.frames_seen} patches_seen={rs.patches_seen} "
+            f"recovered={rs.patches_recovered} failed={rs.patches_failed_recovery}"
+        )
+        print(
+            f"          tracks: total_created={ts.next_track_id} matches={ts.matches} "
+            f"new={ts.new_tracks} expired={ts.expired_tracks}"
+        )
+
+    if reorder is not None:
+        rb = reorder.stats
+        print()
+        print(
+            f"[order]   in={rb.frames_in} out={rb.frames_out} "
+            f"by_size={rb.emitted_by_size} by_timeout={rb.emitted_by_timeout} "
+            f"by_flush={rb.emitted_by_flush} "
+            f"ooo_at_emit={rb.out_of_order_at_emit}"
+        )
+
+    sys.exit(0)
 
 def _handle_frame(
     rf: ReceivedFrame,

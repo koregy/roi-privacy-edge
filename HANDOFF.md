@@ -47,13 +47,66 @@
 - Test C (delay 20-50ms): TTL(200ms) 내, 무손실, avg_delay=34.74ms
 - Test D (drop 15% + delay 10-30ms): ChainedFilter 순서 효과 검증 — delay filter의 seen=188 < drop filter의 seen=219, drop된 31 패킷이 sleep 절약
 
+### Week 2 Day 2 완료 (May 24 늦은 오후 ~ 밤) — Recovery + Reorder + Header Redundancy
+
+#### 신규 파일
+- `server/recovery/tracker.py` — IoU-based greedy multi-object tracker
+- `server/recovery/zoh.py` — Zero-order Hold recovery layer
+- `server/recovery/__init__.py`
+- `server/transport/reorder.py` — Frame reorder buffer (min-heap, bounded latency)
+
+#### 수정 파일
+- `server/transport/udp_receiver.py`
+  - `ReceivedPatch.recovered: bool = False` 필드 추가 (stitcher dispatch용)
+  - **Dedup 메커니즘 추가:** `_emitted_frame_ids: set[int]` + 4군데 가드
+    (handle_frame_header, attach_to_frame, maybe_emit_frame, sweep_expired_frames)
+  - 이유: FRAME_HEADER redundancy=3과 결합 시 같은 frame_id가 3번 emit되는 버그 발견 (특히 detection=0인 frame). dedup으로 idempotent 보장.
+- `server/stitcher/naive.py` — recovered 패치 빨간 테두리 (BGR red=0,0,255)
+- `edge/transport/udp_sender.py` — `send_frame()`에 `header_redundancy: int = 1` 인자 추가, FRAME_HEADER N회 전송 for 루프
+- `scripts/run_server_stitch.py` — recovery + reorder wire-up, CLI 인자, stats 출력
+- `scripts/run_edge_video.py` — `--header-redundancy` CLI 인자
+
+#### CLI 추가 인자
+- 수신측: `--recovery`, `--recovery-iou` (default 0.3), `--recovery-max-age` (default 10), `--reorder`, `--reorder-size` (default 5), `--reorder-wait-ms` (default 500)
+- 송신측: `--header-redundancy` (default 1 = no redundancy)
+
+#### 검증 결과 (drop 30%, sim_seed=42, redundancy=3, fps=12)
+
+| Test | 조건 | mp4 frames | 핵심 결과 |
+|------|------|------|------|
+| A | baseline (default) | 100 | 회귀 통과 |
+| E | recovery off, redund=1 | 58 | Day 1 Test B와 동일 |
+| F | recovery on, redund=1 | 58 | recovered=20, tracks=7 (ID switch 발생) |
+| G | reorder only, redund=1 | 58 | ooo_at_emit=4 |
+| H | recovery+reorder, redund=1 | 58 | **tracks=1** (reorder가 ID 일관성 회복) |
+| J | drop 0, redund=3 | 100 | dedup 검증 (수정 전 166 → 수정 후 100) |
+| **I** | **drop 30, recovery+reorder+redund=3** | **97** | **recovered=24, tracks=1** |
+| K | I와 동일, recovery off | 97 (예정) | 시각 비교용 |
+
+#### 핵심 성과 (Test I)
+- `mp4 frames written: 97/100` — FRAME_HEADER cascade 해소 (이론값 0.3³ = 0.027 → 97.3 frame 살아남음)
+- 시각적으로 부드러운 사람 인식 확인
+- ZoH가 24개 손실 patch를 빨간 테두리로 시각화하며 복구
+
+#### 발견된 부채 → 보고서 처리
+- **UDP out-of-order**: UDPReceiver는 frame_id 순서 보장 없이 emit. Reorder buffer (5 frame, 500ms timeout)로 완화. 4 frame은 여전히 ooo (size 늘리면 줄지만 latency 증가).
+- **FRAME_HEADER cascade**: 단일 packet 손실이 frame 전체 손실로 cascade. redundancy=3로 0.3³ = 0.027 로 감소. 추가 packet 비용은 100 frame당 200 packet (32B × 200 = 6.4KB, 무관).
+- **ZoH의 본질적 한계**: 빠른 객체 이동에서 misalignment. Day 5 평가 단계에서 옵션 1 (motion prediction) 적용 여부 결정.
+- **빈 frame redundant emit 버그 (수정됨)**: `expected_patches=0`인 frame이 redundancy 횟수만큼 emit되던 문제. `_emitted_frame_ids` set으로 dedup하여 해결.
+
+#### Day 5 데모/평가 권고
+- 데모 영상: drop 15%로 시연 (30%는 cascade 영향 줄어도 여전히 frame loss 일부)
+- 평가 데이터: drop {0%, 15%, 25%, 30%} × recovery {on, off} × redundancy {1, 3}
+- 인코딩: `--fps 12` (송신 fps와 일치)
+- RQ4 시연: ZoH 복구 + 빨간 테두리 시각화 + Day 3 PID adaptive 통합
+
 ### 압축 일정 (May 24 → 29, 6일)
 - Day 1 (5/24 토): constraint simulator ✅
-- Day 2 (5/25 일): IoU tracker + Zero-order Hold recovery
-- Day 3 (5/26 월): 결정 로직 (Normal/Warning/Emergency) + open-loop adaptive quality
-- Day 4 (5/27 화): 피드백 채널 시도 → 안 되면 open-loop 폴백 → Streamlit 셸
-- Day 5 (5/28 수): Streamlit 4패널 + 평가 실험
-- Day 6 (5/29 목): 평가 마무리 + 보고서 + 데모 영상 + 제출
+- Day 2 (5/24 늦은 오후~밤): IoU tracker + ZoH recovery + reorder buffer + FRAME_HEADER redundancy + dedup ✅
+- Day 3 (5/25 일): Decision logic + Adaptive controller (옵션 2 confidence-weighted + 옵션 4 PID 통합)
+- Day 4 (5/26 월): 피드백 채널 시도 → 안 되면 open-loop 폴백 → Streamlit 셸
+- Day 5 (5/27 화): Streamlit 4패널 + 평가 실험
+- Day 6 (5/28 수): 평가 마무리 + 보고서 + 데모 영상 + 제출
 
 ### Scope cuts (확정)
 - ❌ Noise 시뮬레이터
@@ -430,6 +483,9 @@ roi-privacy-edge/
 8. **TRT/CUDA 오류에 `assert` 사용 (`yolov8_trt.py`)** — 7개. `python -O` 시 비활성화. `raise RuntimeError(...)` 교체 권장. Jetson 직접 실행 시 `-O` 안 쓰므로 당장 급하진 않음.
 9. **delay만으로는 손실 발생 안 함** — TTL(patch=200ms, frame=500ms) 안쪽 delay는 무손실. 평가에서 delay 효과 보려면 100~200ms 범위 필요. Day 5 평가 단계에서 결정.
 10. **FRAME_HEADER 손실의 cascade 효과** — FRAME_HEADER가 drop되면 그 프레임 전체가 mp4에서 사라짐 (패치 도착했어도). 평가 시 frame loss 과대평가 가능. 해결책: (a) FRAME_HEADER duplicate 전송 또는 (b) 첫 PATCH_CHUNK에 frame meta prefix 추가. Day 5 평가 시 영향 보고 결정.
+11. **`patches: List` vs `Dict` 혼란**: `_FrameAssembly.patches`는 Dict[int, ReceivedPatch] (내부용), `ReceivedFrame.patches`는 List[ReceivedPatch] (외부 노출, det_id 정렬). 헷갈리기 쉬움. Recovery layer 작성 시 처음에 Dict로 가정해 AttributeError 발생.
+12. **`expected_patches=0` 빈 frame의 redundancy emit 버그 (해결됨)**: redundancy>1일 때 같은 frame_id가 redundancy 횟수만큼 emit. `_emitted_frame_ids: set` dedup으로 해결.
+13. **RQ4 정렬**: 본 시스템은 결정론적 알고리즘 (filtering, thresholding) 사용. 프로젝트 조건의 "AI does not necessarily mean large or complex models" 명시. Day 3에 confidence-weighted decision + PID adaptive로 RQ4 카테고리 강화 예정.
 
 ---
 
@@ -476,7 +532,9 @@ def _handle_frame(rf, writer, png_dir, draw_bbox):
 ---
 
 ## TODO before next chat
-
-- [x] git commit + push (Day 0 + Day 1 변경사항 일괄) ← May 13에 완료됨
-- [x] 노트북에 git pull  ← May 24에 완료
-- [ ] Week 2 Day 2: IoU tracker + Zero-order Hold recovery 구현
+- [x] git commit + push (Day 0 + Day 1 변경사항 일괄)
+- [x] 노트북에 git pull
+- [x] Week 2 Day 1: constraint simulator
+- [x] Week 2 Day 2: recovery + reorder + redundancy + dedup
+- [ ] Week 2 Day 3: Decision logic + Adaptive (옵션 2 + 4 통합)
+- [ ] Test K (recovery off 비교 영상) — Day 2 마지막 검증

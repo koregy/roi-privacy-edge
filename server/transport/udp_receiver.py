@@ -82,7 +82,7 @@ class ReceivedPatch:
     complete: bool
     chunks_received: int
     chunks_expected: int
-
+    recovered: bool = False   # set True by RecoveryLayer when this patch was filled from a prior frame
     @property
     def loss_ratio(self) -> float:
         if self.chunks_expected == 0:
@@ -158,6 +158,7 @@ class UDPReceiver:
         self._frame_ttl_s = float(frame_ttl_s)
         self._inflight_patches: Dict[PatchKey, _PatchAssembly] = {}
         self._inflight_frames: Dict[int, _FrameAssembly] = {}
+        self._emitted_frame_ids: set[int] = set()
         self.stats = ReceiveStats()
 
     def poll(self, timeout_s: float = 0.01) -> Iterator[object]:
@@ -252,6 +253,9 @@ class UDPReceiver:
             return
 
         self.stats.frame_headers_received += 1
+        # Idempotent: ignore duplicate FRAME_HEADERs for already-emitted frames.
+        if frame_id in self._emitted_frame_ids:
+            return
         fr = self._inflight_frames.get(frame_id)
         if fr is None:
             self._inflight_frames[frame_id] = _FrameAssembly(
@@ -318,6 +322,8 @@ class UDPReceiver:
         return None
 
     def _attach_to_frame(self, rp: ReceivedPatch) -> None:
+        if rp.frame_id in self._emitted_frame_ids:
+            return  # already-emitted frame; ignore late-arriving patches
         fr = self._inflight_frames.get(rp.frame_id)
         if fr is None:
             fr = _FrameAssembly(
@@ -339,6 +345,7 @@ class UDPReceiver:
             return
 
         del self._inflight_frames[frame_id]
+        self._emitted_frame_ids.add(frame_id)
         self.stats.frames_complete += 1
         all_complete = all(p.complete for p in fr.patches.values())
         yield ReceivedFrame(
@@ -388,6 +395,7 @@ class UDPReceiver:
                 expired.append(fid)
         for fid in expired:
             fr = self._inflight_frames.pop(fid)
+            self._emitted_frame_ids.add(fid)
             self.stats.frames_partial_ttl += 1
             expected = (
                 fr.expected_patches if fr.expected_patches >= 0
