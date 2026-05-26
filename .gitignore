@@ -37,4 +37,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
-*.swobackup/
+*.swo
+
+# Generated outputs
+*.mp4
+backup/

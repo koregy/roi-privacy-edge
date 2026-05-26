@@ -1,10 +1,16 @@
-"""UDP receiver for server node."""
-
+"""UDP receiver and constraint simulator for server node."""
 from server.transport.udp_receiver import (
     ReceivedFrame,
     ReceivedPatch,
     ReceiveStats,
     UDPReceiver,
+)
+from server.transport.constraint_sim import (
+    ChainedFilter,
+    DelayJitterFilter,
+    FilterStats,
+    RandomDropFilter,
+    build_filter,
 )
 
 __all__ = [
@@ -12,10 +18,9 @@ __all__ = [
     "ReceivedPatch",
     "ReceivedFrame",
     "ReceiveStats",
+    "RandomDropFilter",
+    "DelayJitterFilter",
+    "ChainedFilter",
+    "FilterStats",
+    "build_filter",
 ]
-
-"""
-packet_filter: Optional. Called with each received UDP buffer before
-    reassembly. Return None to drop, or bytes to substitute. Used by
-    the Week 2 constraint simulator.
-"""
