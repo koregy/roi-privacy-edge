@@ -29,6 +29,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Iterator
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -37,6 +38,7 @@ from common.config import DEFAULT_JPEG_QUALITY
 from edge.detector.yolov8_trt import YOLOv8TRT
 from edge.patch import PatchJPEGEncoder, extract_patches
 from edge.transport import UDPSender
+from edge.control import FeedbackReceiver
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENGINE = PROJECT_ROOT / "engines" / "yolov8n_fp16.engine"
@@ -57,9 +59,38 @@ def iter_frames(source: Path) -> Iterator[tuple[int, np.ndarray]]:
                 continue
             yield i, img
     else:
-        cap = cv2.VideoCapture(str(source))
+        # Camera index ("0", "1", ...) -> int for cv2.VideoCapture
+        # /dev/videoN device path -> str
+        # mp4/avi path -> str
+        src_str = str(source)
+        if src_str.isdigit():
+            cap_src = int(src_str)
+            is_camera = True
+        elif src_str.startswith("/dev/video"):
+            cap_src = src_str
+            is_camera = True
+        else:
+            cap_src = src_str
+            is_camera = False
+
+        cap = cv2.VideoCapture(cap_src)
         if not cap.isOpened():
             raise SystemExit(f"cv2.VideoCapture failed: {source}")
+
+        # Configure camera resolution (no-op for file input)
+        if is_camera:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            # Confirm what was actually applied
+            w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            print(
+                f"[cam]     opened {source} -> {int(w)}x{int(h)} @ {fps:.1f}fps",
+                flush=True,
+            )
+
         i = 0
         try:
             while True:
@@ -70,7 +101,6 @@ def iter_frames(source: Path) -> Iterator[tuple[int, np.ndarray]]:
                 i += 1
         finally:
             cap.release()
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Edge-side video sender.")
@@ -101,6 +131,18 @@ def main() -> None:
         "--log-every", type=int, default=10,
         help="Print per-frame stats every N frames.",
     )
+    ap.add_argument(
+        "--enable-feedback", action="store_true",
+        help="Enable feedback receiver and dynamic quality control.",
+    )
+    ap.add_argument(
+        "--feedback-bind", default="0.0.0.0",
+        help="Bind address for feedback receiver (default 0.0.0.0).",
+    )
+    ap.add_argument(
+        "--feedback-port", type=int, default=9001,
+        help="UDP port to listen for feedback (default 9001).",
+    )
     args = ap.parse_args()
 
     print(f"[setup]   engine={args.engine}")
@@ -109,6 +151,16 @@ def main() -> None:
 
     detector = YOLOv8TRT(args.engine)
     encoder = PatchJPEGEncoder(default_quality=args.quality)
+
+    feedback_receiver: Optional[FeedbackReceiver] = None
+    if args.enable_feedback:
+        feedback_receiver = FeedbackReceiver(
+            args.feedback_bind, args.feedback_port,
+        )
+        print(
+            f"[fb-rx]   listening on {args.feedback_bind}:{args.feedback_port}",
+            flush=True,
+        )
 
     target_interval = 1.0 / args.target_fps if args.target_fps > 0 else 0.0
 
@@ -144,6 +196,17 @@ def main() -> None:
             # ----- Extract + encode -----
             t0 = time.perf_counter()
             patches = extract_patches(frame, detections, frame_id=fid)
+
+            # Poll for quality feedback from server (closed-loop adaptive).
+            if feedback_receiver is not None:
+                new_q = feedback_receiver.poll()
+                if new_q is not None:
+                    encoder.set_quality(new_q)
+                    print(
+                        f"[fb-rx]   frame={fid} quality changed to {new_q}",
+                        flush=True,
+                    )
+
             encoded = encoder.encode_many(patches)
             encode_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -181,6 +244,15 @@ def main() -> None:
           f"bytes={tx.stats.bytes_sent} "
           f"errors={tx.stats.send_errors}")
 
+    if feedback_receiver is not None:
+        fs = feedback_receiver.stats
+        print()
+        print(
+            f"[fb-rx]   packets={fs.packets_received} bytes={fs.bytes_received} "
+            f"changes={fs.quality_changes} bad_hdr={fs.bad_header} "
+            f"bad_pay={fs.bad_payload} stale={fs.stale_frame_id}"
+        )
+        feedback_receiver.close()
 
 if __name__ == "__main__":
     main()
