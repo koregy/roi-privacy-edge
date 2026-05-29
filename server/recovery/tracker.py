@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from server.transport import ReceivedFrame, ReceivedPatch
-
+from server.recovery.kalman import (
+    KalmanState, kf_predict, kf_correct, kf_position, bbox_center, kf_predicted_bbox,
+)
 
 Bbox = Tuple[int, int, int, int]
 
@@ -59,7 +61,7 @@ class Track:
     last_quality: int
     last_frame_id: int
     age: int = 0   # frames since last match
-
+    kalman: KalmanState = field(default_factory=KalmanState)
 
 @dataclass
 class TrackerStats:
@@ -104,13 +106,16 @@ class IoUTracker:
         # Age all existing tracks by one; we'll reset to 0 on match below.
         for t in self._tracks.values():
             t.age += 1
+            kf_predict(t.kalman)
 
-        # Build pairwise IoU between current patches and existing tracks.
-        # Greedy: pick the highest IoU pair, assign, repeat.
-        candidates: List[Tuple[float, int, int]] = []  # (iou, det_id, track_id)
+        # Build pairwise IoU using Kalman-predicted bbox for each track.
+        # This accounts for object motion since last observation, improving
+        # matching for fast-moving or briefly-occluded objects.
+        candidates: List[Tuple[float, int, int]] = []
         for p in patches:
             for tid, t in self._tracks.items():
-                score = iou(p.bbox, t.last_bbox)
+                predicted_bbox = kf_predicted_bbox(t.kalman, t.last_bbox)
+                score = iou(p.bbox, predicted_bbox)
                 if score >= self.iou_threshold:
                     candidates.append((score, p.det_id, tid))
         candidates.sort(reverse=True)
@@ -133,7 +138,7 @@ class IoUTracker:
             new_id = self.stats.next_track_id
             self.stats.next_track_id += 1
             self.stats.new_tracks += 1
-            self._tracks[new_id] = Track(
+            new_track = Track(
                 track_id=new_id,
                 last_bbox=p.bbox,
                 last_expanded_bbox=p.expanded_bbox,
@@ -142,6 +147,9 @@ class IoUTracker:
                 last_frame_id=p.frame_id,
                 age=0,
             )
+            cx, cy = bbox_center(p.bbox)
+            kf_correct(new_track.kalman, cx, cy)
+            self._tracks[new_id] = new_track
             det_to_track[p.det_id] = new_id
 
         # Update matched tracks: bbox always; data only if complete.
@@ -151,6 +159,9 @@ class IoUTracker:
             t.last_bbox = patch.bbox
             t.last_frame_id = patch.frame_id
             t.age = 0
+            # Kalman correct from observed bbox center.
+            cx, cy = bbox_center(patch.bbox)
+            kf_correct(t.kalman, cx, cy)
             if patch.complete:
                 t.last_data = patch.data
                 t.last_expanded_bbox = patch.expanded_bbox

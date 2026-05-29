@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from server.transport import ReceivedFrame, ReceivedPatch
 from server.recovery.tracker import IoUTracker
-
+from server.recovery.kalman import kf_position, bbox_center
 
 @dataclass
 class RecoveryStats:
@@ -69,12 +69,30 @@ class RecoveryLayer:
                 new_patches.append(p)
                 continue
 
-            # Recover: replace data + expanded_bbox with prior values.
-            # Keep CURRENT bbox (where the object is now) for visualization.
+            # Recover with motion compensation.
+            # 1. Use Kalman prediction to estimate where the object is NOW.
+            # 2. Translate the prior expanded_bbox so the cached image is
+            #    pasted at the predicted current position.
+            # The bbox itself is left unchanged (current detection's bbox),
+            # so visualization shows the actual detection location.
+            cx_pred, cy_pred = kf_position(track.kalman)
+            # Old expanded_bbox center (when this data was captured).
+            old_ex = track.last_expanded_bbox
+            if old_ex is not None and track.kalman.initialized:
+                old_cx, old_cy = bbox_center(old_ex)
+                dx = int(round(cx_pred - old_cx))
+                dy = int(round(cy_pred - old_cy))
+                # Translate the expanded_bbox by (dx, dy).
+                x1, y1, x2, y2 = old_ex
+                new_expanded = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+            else:
+                # Fall back to static ZoH if no Kalman state.
+                new_expanded = track.last_expanded_bbox
+
             recovered = dataclasses.replace(
                 p,
                 data=track.last_data,
-                expanded_bbox=track.last_expanded_bbox,
+                expanded_bbox=new_expanded,
                 complete=True,
                 recovered=True,
             )

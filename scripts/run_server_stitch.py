@@ -33,6 +33,7 @@ from server.transport.reorder import ReorderBuffer
 from server.recovery import IoUTracker, RecoveryLayer
 from server.decision import DecisionStateMachine, DecisionState
 from server.control import PIDAdaptiveController
+from server.control.feedback_sender import FeedbackSender
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -177,6 +178,33 @@ def main() -> None:
         "--adaptive-initial-q", type=int, default=75,
         help="Initial JPEG quality for adaptive controller (default 75).",
     )
+    ap.add_argument(
+        "--adaptive-min-q", type=int, default=30,
+        help="Minimum JPEG quality controller can output (default 30). "
+             "Higher values prevent patch from becoming single-chunk "
+             "and increase recoverability at cost of bandwidth.",
+    )
+    ap.add_argument(
+        "--adaptive-max-q", type=int, default=95,
+        help="Maximum JPEG quality controller can output (default 95).",
+    )
+    ap.add_argument(
+        "--feedback", action="store_true",
+        help="Enable closed-loop feedback: send quality changes to edge "
+             "(requires --adaptive).",
+    )
+    ap.add_argument(
+        "--feedback-edge-host", default="",
+        help="Edge IP to send feedback packets to (required with --feedback).",
+    )
+    ap.add_argument(
+        "--feedback-port", type=int, default=9001,
+        help="UDP port on edge that listens for feedback (default 9001).",
+    )
+    ap.add_argument(
+        "--feedback-redundancy", type=int, default=2,
+        help="How many times to send each feedback packet (default 2).",
+    )
     args = ap.parse_args()
 
     out_path = Path(args.output)
@@ -240,9 +268,24 @@ def main() -> None:
         adaptive = PIDAdaptiveController(
             target_ratio=args.adaptive_target,
             initial_quality=args.adaptive_initial_q,
+            min_quality=args.adaptive_min_q,
+            max_quality=args.adaptive_max_q,
+        )
+
+    feedback_sender: Optional[FeedbackSender] = None
+    if args.feedback:
+        if adaptive is None:
+            raise SystemExit("--feedback requires --adaptive")
+        if not args.feedback_edge_host:
+            raise SystemExit("--feedback requires --feedback-edge-host")
+        feedback_sender = FeedbackSender(
+            edge_host=args.feedback_edge_host,
+            edge_port=args.feedback_port,
+            redundancy=args.feedback_redundancy,
         )
 
     current_state = DecisionState.NORMAL
+    last_sent_quality: Optional[int] = None
 
     with UDPReceiver(
         args.bind, args.port,
@@ -265,12 +308,17 @@ def main() -> None:
                     else:
                         emitted = [event]
                     for ev in emitted:
-                        current_state, _ = _process_frame(
+                        current_state, new_q = _process_frame(
                             ev,
                             state_machine=state_machine, adaptive=adaptive,
                             recovery=recovery, writer=writer, png_dir=png_dir,
                             draw_bbox=args.draw_bbox, prev_state=current_state,
                         )
+                        if feedback_sender is not None and new_q is not None and new_q != last_sent_quality:
+                            feedback_sender.send_quality(
+                                frame_id=ev.frame_id, target_quality=new_q,
+                            )
+                            last_sent_quality = new_q
                         frames_done += 1
                     last_frame_t = time.perf_counter()
 
@@ -306,23 +354,33 @@ def main() -> None:
                 else:
                     emitted = [event]
                 for ev in emitted:
-                    current_state, _ = _process_frame(
+                    current_state, new_q = _process_frame(
                         ev,
                         state_machine=state_machine, adaptive=adaptive,
                         recovery=recovery, writer=writer, png_dir=png_dir,
                         draw_bbox=args.draw_bbox, prev_state=current_state,
                     )
+                    if feedback_sender is not None and new_q is not None and new_q != last_sent_quality:
+                        feedback_sender.send_quality(
+                            frame_id=ev.frame_id, target_quality=new_q,
+                        )
+                        last_sent_quality = new_q
                     frames_done += 1
 
         # Drain reorder buffer.
         if reorder is not None:
             for ev in reorder.flush():
-                current_state, _ = _process_frame(
+                current_state, new_q = _process_frame(
                     ev,
                     state_machine=state_machine, adaptive=adaptive,
                     recovery=recovery, writer=writer, png_dir=png_dir,
                     draw_bbox=args.draw_bbox, prev_state=current_state,
                 )
+                if feedback_sender is not None and new_q is not None and new_q != last_sent_quality:
+                    feedback_sender.send_quality(
+                        frame_id=ev.frame_id, target_quality=new_q,
+                    )
+                    last_sent_quality = new_q
                 frames_done += 1
 
     writer.close()
@@ -409,6 +467,16 @@ def main() -> None:
             f"q_range=[{s.quality_min_seen}, {s.quality_max_seen}] "
             f"q_avg={avg_q:.1f} q_final={adaptive.quality}"
         )
+
+    if feedback_sender is not None:
+        fs = feedback_sender.stats
+        print(
+            f"[fb-tx]   sends={fs.sends} packets={fs.packets_sent} "
+            f"bytes={fs.bytes_sent} errors={fs.send_errors}"
+        )
+    
+    if feedback_sender is not None:
+        feedback_sender.close()
 
     sys.exit(0)
 

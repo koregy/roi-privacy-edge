@@ -141,6 +141,44 @@
 - Adaptive controller가 quality 계산만 함. 엣지에 전달은 Day 4 (피드백 채널 또는 open-loop fallback).
 - Streamlit 셸 시작 (Day 4 오후).
 
+### Week 2 Day 4 완료 (May 25 늦은 밤 ~ 26 새벽) — Closed-Loop + Kalman + 영상 발굴
+
+#### 신규 파일
+- `common/packet.py` (수정): FEEDBACK packet format (33B = 32B header + 1B payload)
+- `server/control/feedback_sender.py`: UDP sender for server→edge quality feedback
+- `edge/control/feedback_receiver.py`: Non-blocking UDP receiver, idempotent dedup
+- `edge/control/__init__.py`
+- `server/recovery/kalman.py`: 4-state constant-velocity Kalman filter
+
+#### 수정 파일
+- `server/recovery/tracker.py`: Track에 KalmanState 필드, predict/correct, kf_predicted_bbox 매칭에 사용
+- `server/recovery/zoh.py`: Kalman predicted position으로 expanded_bbox 평행이동
+- `scripts/run_server_stitch.py`: `--feedback`, `--feedback-edge-host`, `--feedback-port`, `--feedback-redundancy`, `--adaptive-min-q`, `--adaptive-max-q` 추가
+- `scripts/run_edge_video.py`: `--enable-feedback`, `--feedback-bind`, `--feedback-port` 추가. 카메라 입력 지원 (`--source 0` 또는 `/dev/video0`)
+
+#### 핵심 발견
+- 폐쇄루프 동작 입증 (Test P: sends=25, packets=50, changes=19, stale=6)
+- Kalman 효과 person-bicycle-car-detection.mp4에서 명확 (사람이 슬라이드, 순간이동 없음)
+- 다중 사람 영상 (new_vid.mp4, 16명) 21개 트랙 생성 (5 over-counting = ID switch)
+- Detection 한계: 작은 객체 깜빡임은 트래커 튜닝으로 해결 불가
+- **Demo configuration 발견**: 정적 quality (q=50) + 폐쇄루프 OFF가 시각 일관성 우월. 폐쇄루프는 정량 입증용으로 분리.
+
+#### Demo 후보 영상
+- `person-bicycle-car-detection.mp4`: 단일 사람, Kalman 효과 명확 (핵심 시연)
+- `new_vid_2x.mp4`: 다중 사람 16명, ID switch 시연 (다중 객체 시연)
+- 라이브 카메라 (Logitech C270, 640x480): 실시간 시연
+
+#### 트레이드오프 분석
+- Closed-loop PID는 정량적으로 동작이지만 quality 변동이 시각 출렁임 만듦
+- Static q=50 + recovery + redundancy 5 = demo 시 가장 부드러움
+- Future work: PID output smoothing (EWMA), quality change rate limiting
+
+#### TODO (Day 5 = 내일)
+- [ ] Streamlit dashboard (1~2 patterns 우선)
+- [ ] Demo 영상 8 scene 측정 + 결합
+- [ ] 영상 자막 추가
+- [ ] 제출
+
 ### 압축 일정 (May 24 → 29, 6일)
 - Day 1 (5/24 토): constraint simulator ✅
 - Day 2 (5/24 늦은 오후~밤): IoU tracker + ZoH recovery + reorder buffer + FRAME_HEADER redundancy + dedup ✅

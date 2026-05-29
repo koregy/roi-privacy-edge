@@ -94,6 +94,12 @@ FRAME_HEADER_PAYLOAD_FORMAT = "!B H H"
 FRAME_HEADER_PAYLOAD_SIZE = struct.calcsize(FRAME_HEADER_PAYLOAD_FORMAT)
 assert FRAME_HEADER_PAYLOAD_SIZE == 5
 
+# For PKT_TYPE_FEEDBACK, payload after the 32-byte header is:
+#   - target_quality: uint8 (30 to 95, JPEG quality value)
+FEEDBACK_PAYLOAD_FORMAT = "!B"
+FEEDBACK_PAYLOAD_SIZE = struct.calcsize(FEEDBACK_PAYLOAD_FORMAT)
+assert FEEDBACK_PAYLOAD_SIZE == 1
+
 # ---------- PATCH_CHUNK metadata prefix (chunk 0 only) ----------
 # 8 bytes packed before JPEG data in chunk_idx == 0:
 #   exp_x1, exp_y1, exp_x2, exp_y2 : uint16 × 4
@@ -233,6 +239,43 @@ def parse_frame_header_payload(payload: bytes) -> tuple[int, int, int]:
         )
     return struct.unpack(FRAME_HEADER_PAYLOAD_FORMAT, payload)
 
+# ---------- FEEDBACK builder / parser ----------
+
+def build_feedback_packet(
+    *, frame_id: int, target_quality: int,
+) -> bytes:
+    """Build a wire-ready FEEDBACK packet (length = 33 B).
+
+    Sent from server to edge to suggest a new JPEG quality value.
+    The frame_id field carries the latest server-observed frame_id at
+    the time of the recommendation; the edge can use this to detect
+    stale feedback.
+    """
+    if not 30 <= target_quality <= 95:
+        raise ValueError(
+            f"target_quality out of range [30, 95]: {target_quality}"
+        )
+    payload = struct.pack(FEEDBACK_PAYLOAD_FORMAT, target_quality)
+    hdr = PacketHeader(
+        frame_id=frame_id,
+        det_id=0, quality=0, chunk_idx=0, chunk_count=0,
+        payload_len=len(payload),
+        bbox=(0, 0, 0, 0),
+        confidence=0.0,
+        pkt_type=PKT_TYPE_FEEDBACK,
+    )
+    return hdr.pack() + payload
+
+
+def parse_feedback_payload(payload: bytes) -> int:
+    """Parse 1-byte FEEDBACK payload → target_quality."""
+    if len(payload) != FEEDBACK_PAYLOAD_SIZE:
+        raise ValueError(
+            f"FEEDBACK payload size mismatch: "
+            f"{len(payload)} != {FEEDBACK_PAYLOAD_SIZE}"
+        )
+    (target_quality,) = struct.unpack(FEEDBACK_PAYLOAD_FORMAT, payload)
+    return target_quality
 
 # ---------- PATCH_CHUNK metadata prefix helpers ----------
 
