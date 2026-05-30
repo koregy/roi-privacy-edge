@@ -43,13 +43,18 @@ class RandomDropFilter:
         self._rng = random.Random(seed)
         self.stats = FilterStats()
 
+    def set_drop_prob(self, new_p: float) -> None:
+        """Update drop probability at runtime. Used by dashboard."""
+        if not 0.0 <= new_p <= 1.0:
+            raise ValueError(f"drop_prob must be in [0, 1], got {new_p}")
+        self.p = new_p
+
     def __call__(self, buf: bytes) -> Optional[bytes]:
         self.stats.seen += 1
         if self._rng.random() < self.p:
             self.stats.dropped += 1
             return None
         return buf
-
 
 class DelayJitterFilter:
     """Delay each packet by a uniformly random duration in [min_ms, max_ms]."""

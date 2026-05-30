@@ -17,6 +17,8 @@ import argparse
 import signal
 import sys
 import time
+import json
+import queue
 from pathlib import Path
 from typing import Optional
 
@@ -37,9 +39,7 @@ from server.control.feedback_sender import FeedbackSender
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-
 _running = True
-
 
 def _on_sigint(signum, frame):  # noqa: ARG001
     global _running
@@ -86,7 +86,6 @@ class VideoWriterLazy:
         if self._writer is not None:
             self._writer.release()
             self._writer = None
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Server receiver + naive stitcher.")
@@ -205,6 +204,14 @@ def main() -> None:
         "--feedback-redundancy", type=int, default=2,
         help="How many times to send each feedback packet (default 2).",
     )
+    ap.add_argument(
+        "--no-kalman", action="store_true",
+        help="Disable Kalman in recovery"
+    )
+    ap.add_argument(
+        "--no-predict", action="store_true",
+        help="Disable predict-only in recovery"
+    )
     args = ap.parse_args()
 
     out_path = Path(args.output)
@@ -243,7 +250,9 @@ def main() -> None:
             IoUTracker(
                 iou_threshold=args.recovery_iou,
                 max_age=args.recovery_max_age,
-            )
+            ),
+            kalman_enabled=not args.no_kalman,
+            predict_enabled=not args.no_predict,
         )
     
     reorder: Optional[ReorderBuffer] = None
@@ -308,6 +317,10 @@ def main() -> None:
                     else:
                         emitted = [event]
                     for ev in emitted:
+                        # Apply dashboard control (every 10 frames)
+                        if frames_done % 10 == 0:
+                            _apply_control(recovery=recovery, packet_filter=packet_filter)
+                        
                         current_state, new_q = _process_frame(
                             ev,
                             state_machine=state_machine, adaptive=adaptive,
@@ -320,6 +333,17 @@ def main() -> None:
                             )
                             last_sent_quality = new_q
                         frames_done += 1
+
+                        # Dump stats (every 5 frames)
+                        if frames_done % 5 == 0:
+                            _dump_stats(
+                                frames_done=frames_done,
+                                current_state=current_state,
+                                state_machine=state_machine,
+                                adaptive=adaptive,
+                                recovery=recovery,
+                                packet_filter=packet_filter,
+                            )
                     last_frame_t = time.perf_counter()
 
             # Idle timeout: exit if nothing's arrived in a while.
@@ -354,6 +378,10 @@ def main() -> None:
                 else:
                     emitted = [event]
                 for ev in emitted:
+                    # Apply dashboard control (every 10 frames)
+                    if frames_done % 10 == 0:
+                        _apply_control(recovery=recovery, packet_filter=packet_filter)
+                    
                     current_state, new_q = _process_frame(
                         ev,
                         state_machine=state_machine, adaptive=adaptive,
@@ -367,9 +395,24 @@ def main() -> None:
                         last_sent_quality = new_q
                     frames_done += 1
 
+                    # Dump stats (every 5 frames)
+                    if frames_done % 5 == 0:
+                        _dump_stats(
+                            frames_done=frames_done,
+                            current_state=current_state,
+                            state_machine=state_machine,
+                            adaptive=adaptive,
+                            recovery=recovery,
+                            packet_filter=packet_filter,
+                        )
+
         # Drain reorder buffer.
         if reorder is not None:
             for ev in reorder.flush():
+                # Apply dashboard control (every 10 frames)
+                if frames_done % 10 == 0:
+                    _apply_control(recovery=recovery, packet_filter=packet_filter)
+                
                 current_state, new_q = _process_frame(
                     ev,
                     state_machine=state_machine, adaptive=adaptive,
@@ -382,6 +425,17 @@ def main() -> None:
                     )
                     last_sent_quality = new_q
                 frames_done += 1
+
+                # Dump stats (every 5 frames)
+                if frames_done % 5 == 0:
+                    _dump_stats(
+                        frames_done=frames_done,
+                        current_state=current_state,
+                        state_machine=state_machine,
+                        adaptive=adaptive,
+                        recovery=recovery,
+                        packet_filter=packet_filter,
+                    )
 
     writer.close()
 
@@ -431,6 +485,7 @@ def main() -> None:
         print(
             f"[recov]   frames={rs.frames_seen} patches_seen={rs.patches_seen} "
             f"recovered={rs.patches_recovered} failed={rs.patches_failed_recovery}"
+            f"predicted={rs.patches_predicted}"
         )
         print(
             f"          tracks: total_created={ts.next_track_id} matches={ts.matches} "
@@ -480,14 +535,27 @@ def main() -> None:
 
     sys.exit(0)
 
+_opencv_window_initialized = False
+
 def _handle_frame(
     rf: ReceivedFrame,
     writer: VideoWriterLazy,
     png_dir: Optional[Path],
     draw_bbox: bool,
 ) -> None:
+    global _opencv_window_initialized
+
     res: StitchResult = stitch_frame(rf, draw_bbox=draw_bbox)
     writer.write(res.image)
+
+    # Live OpenCV display
+    if not _opencv_window_initialized:
+        cv2.namedWindow("ROI Live View", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("ROI Live View", 540, 960)
+        _opencv_window_initialized = True
+    cv2.imshow("ROI Live View", res.image)
+    cv2.waitKey(1)
+
     tag = "complete" if rf.complete else "PARTIAL "
     print(
         f"[stitch] frame={rf.frame_id:>5} {tag} "
@@ -534,6 +602,107 @@ def _process_frame(
     _handle_frame(ev, writer, png_dir, draw_bbox)
     return state, quality    
 
+# ===== Dashboard Stats / Control I/O =====
+
+STATS_PATH = "/tmp/roi_stats.json"
+CONTROL_PATH = "/tmp/roi_control.json"
+
+
+def _dump_stats(
+    *,
+    frames_done: int,
+    current_state,
+    state_machine,
+    adaptive,
+    recovery,
+    packet_filter,
+) -> None:
+    """Write current system stats to STATS_PATH for dashboard polling."""
+    # Find current drop probability inside packet_filter
+    from server.transport.constraint_sim import (
+        ChainedFilter, RandomDropFilter,
+    )
+    drop_prob = 0.0
+    if packet_filter is not None:
+        filters = (
+            packet_filter.filters
+            if isinstance(packet_filter, ChainedFilter)
+            else (packet_filter,)
+        )
+        for f in filters:
+            if isinstance(f, RandomDropFilter):
+                drop_prob = f.p
+                break
+
+    stats = {
+        "timestamp": time.time(),
+        "frames_done": frames_done,
+        "state": current_state.value if current_state else "UNKNOWN",
+        "current_ratio": (
+            state_machine.current_ratio if state_machine else 1.0
+        ),
+        "quality": adaptive.quality if adaptive else None,
+        "tracks_count": (
+            len(recovery.tracker.tracks) if recovery else 0
+        ),
+        "patches_recovered": (
+            recovery.stats.patches_recovered if recovery else 0
+        ),
+        "patches_predicted": (
+            recovery.stats.patches_predicted if recovery else 0
+        ),
+        "patches_failed": (
+            recovery.stats.patches_failed_recovery if recovery else 0
+        ),
+        "drop_prob_current": drop_prob,
+        "recovery_enabled": (
+            recovery.enabled if recovery else False
+        ),
+        "kalman_enabled": (
+            recovery.kalman_enabled if recovery else False
+        ),
+        "predict_enabled": (
+            recovery.predict_enabled if recovery else False
+        ),
+    }
+    try:
+        with open(STATS_PATH, "w") as f:
+            json.dump(stats, f)
+    except OSError:
+        pass  # non-fatal
+
+
+def _apply_control(*, recovery, packet_filter) -> None:
+    """Read dashboard control inputs from CONTROL_PATH and apply."""
+    try:
+        with open(CONTROL_PATH) as f:
+            ctrl = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
+
+    # Recovery flags
+    if recovery is not None:
+        if "recovery_enabled" in ctrl:
+            recovery.enabled = bool(ctrl["recovery_enabled"])
+        if "kalman_enabled" in ctrl:
+            recovery.kalman_enabled = bool(ctrl["kalman_enabled"])
+        if "predict_enabled" in ctrl:
+            recovery.predict_enabled = bool(ctrl["predict_enabled"])
+
+    # Drop probability
+    if packet_filter is not None and "drop_prob" in ctrl:
+        from server.transport.constraint_sim import (
+            ChainedFilter, RandomDropFilter,
+        )
+        filters = (
+            packet_filter.filters
+            if isinstance(packet_filter, ChainedFilter)
+            else (packet_filter,)
+        )
+        for f in filters:
+            if isinstance(f, RandomDropFilter):
+                f.set_drop_prob(float(ctrl["drop_prob"]))
+                break
 
 if __name__ == "__main__":
     main()

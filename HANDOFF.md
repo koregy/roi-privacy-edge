@@ -617,3 +617,19 @@ def _handle_frame(rf, writer, png_dir, draw_bbox):
 - [x] Week 2 Day 2: recovery + reorder + redundancy + dedup
 - [ ] Week 2 Day 3: Decision logic + Adaptive (옵션 2 + 4 통합)
 - [ ] Test K (recovery off 비교 영상) — Day 2 마지막 검증
+
+## 내일 (5/26) 시작 명령
+
+# 노트북 첫 명령
+cd ~/projects/roi-privacy-edge
+git pull
+git status
+
+# Jetson 첫 명령
+cd ~/roi-privacy-edge
+git pull
+git status
+
+# Demo configuration (확정)
+# 노트북: --recovery --recovery-iou 0.15 --recovery-max-age 30 --decision --draw-bbox
+# Jetson: --source data/videos/new_vid_2x.mp4 --quality 50 --header-redundancy 5
