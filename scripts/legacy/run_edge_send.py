@@ -19,10 +19,10 @@ from pathlib import Path
 
 import cv2
 
-from common.config import DEFAULT_JPEG_QUALITY
-from edge.detector.yolov8_trt import YOLOv8TRT
-from edge.patch import PatchJPEGEncoder, extract_patches
-from edge.transport import UDPSender
+from src.common.config import DEFAULT_JPEG_QUALITY
+from src.edge.detector.yolov8_trt import YOLOv8TRT
+from src.edge.patch import PatchJPEGEncoder, extract_patches
+from src.edge.transport import UDPSender
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENGINE = PROJECT_ROOT / "engines" / "yolov8n_fp16.engine"

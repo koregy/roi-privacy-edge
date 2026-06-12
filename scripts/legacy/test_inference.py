@@ -12,7 +12,7 @@ import cv2
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from edge.detector.yolov8_trt import YOLOv8TRT  # noqa: E402
+from src.edge.detector.yolov8_trt import YOLOv8TRT  # noqa: E402
 
 
 def main() -> None:

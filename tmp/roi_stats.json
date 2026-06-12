@@ -1,0 +1,12 @@
+{
+  "frames_done": 150,
+  "state": "WARNING",
+  "current_ratio": 0.71,
+  "quality": 65,
+  "tracks_count": 5,
+  "patches_recovered": 89,
+  "patches_predicted": 31,
+  "patches_failed": 12,
+  "drop_prob_current": 0.20,
+  "timestamp": 1716732000.5
+}

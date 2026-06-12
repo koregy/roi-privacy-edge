@@ -24,18 +24,18 @@ from typing import Optional
 
 import cv2
 
-from server.stitcher import StitchResult, stitch_frame
-from server.transport import (
+from src.server.stitcher import StitchResult, stitch_frame
+from src.server.transport import (
     ReceivedFrame, 
     ReceivedPatch, 
     UDPReceiver,
     build_filter,
 )
-from server.transport.reorder import ReorderBuffer
-from server.recovery import IoUTracker, RecoveryLayer
-from server.decision import DecisionStateMachine, DecisionState
-from server.control import PIDAdaptiveController
-from server.control.feedback_sender import FeedbackSender
+from src.server.transport.reorder import ReorderBuffer
+from src.server.recovery import IoUTracker, RecoveryLayer
+from src.server.decision import DecisionStateMachine, DecisionState
+from src.server.control import PIDAdaptiveController
+from src.server.control.feedback_sender import FeedbackSender
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -455,7 +455,7 @@ def main() -> None:
     
     # Constraint simulator stats (only when active).
     if packet_filter is not None:
-        from server.transport.constraint_sim import (
+        from src.server.transport.constraint_sim import (
             ChainedFilter, RandomDropFilter, DelayJitterFilter,
         )
         filters_to_report = (
@@ -551,7 +551,17 @@ def _handle_frame(
     # Live OpenCV display
     if not _opencv_window_initialized:
         cv2.namedWindow("ROI Live View", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("ROI Live View", 540, 960)
+        h, w = res.image.shape[:2]
+        aspect = w / h
+
+        if aspect > 1.0:
+            target_w = 600
+            target_h = int(target_w / aspect)
+        else:
+            target_h = 700
+            target_w = int(target_h * aspect)
+        
+        cv2.resizeWindow("ROI Live View", target_w, target_h)
         _opencv_window_initialized = True
     cv2.imshow("ROI Live View", res.image)
     cv2.waitKey(1)
@@ -619,7 +629,7 @@ def _dump_stats(
 ) -> None:
     """Write current system stats to STATS_PATH for dashboard polling."""
     # Find current drop probability inside packet_filter
-    from server.transport.constraint_sim import (
+    from src.server.transport.constraint_sim import (
         ChainedFilter, RandomDropFilter,
     )
     drop_prob = 0.0
@@ -691,7 +701,7 @@ def _apply_control(*, recovery, packet_filter) -> None:
 
     # Drop probability
     if packet_filter is not None and "drop_prob" in ctrl:
-        from server.transport.constraint_sim import (
+        from src.server.transport.constraint_sim import (
             ChainedFilter, RandomDropFilter,
         )
         filters = (

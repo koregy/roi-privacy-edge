@@ -21,9 +21,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from common.config import DEFAULT_JPEG_QUALITY
-from edge.detector.yolov8_trt import YOLOv8TRT
-from edge.patch import PatchJPEGEncoder, extract_patches
+from src.common.config import DEFAULT_JPEG_QUALITY
+from src.edge.detector.yolov8_trt import YOLOv8TRT
+from src.edge.patch import PatchJPEGEncoder, extract_patches
 
 
 # ---------- Paths ----------

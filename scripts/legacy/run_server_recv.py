@@ -24,7 +24,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from server.transport import UDPReceiver
+from src.server.transport import UDPReceiver
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = PROJECT_ROOT / "results" / "udp_recv"

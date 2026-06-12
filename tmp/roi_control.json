@@ -1,0 +1,7 @@
+{
+  "drop_prob": 0.30,
+  "recovery_enabled": true,
+  "kalman_enabled": true,
+  "predict_enabled": true,
+  "timestamp": 1716732000.5
+}
