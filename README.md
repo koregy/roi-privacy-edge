@@ -106,39 +106,40 @@ The clean Wi-Fi baseline shows zero natural packet loss, so all recovery-layer e
 
 ### 5.2 Recovery under 30% packet loss
 
-Same video, same network conditions, three configurations:
+Same video, same network conditions, three configurations. The corresponding output videos are committed in `results/`:
 
-| Configuration | Outcome |
-|---|---|
-| Baseline (0% drop) | 2,168 patches complete, no loss |
-| 30% drop, **no recovery** | 1,180 patches lost — people visibly disappear from the stream |
-| 30% drop, **full system** | 1,135 patches recovered via ZoH + Kalman, plus 192 virtual patches generated in predict-only mode — tracking continuity preserved |
+| Configuration | Outcome | Video |
+|---|---|---|
+| Baseline (0% drop) | 2,168 patches complete, no loss | [`comparison_original_h264.mp4`](results/comparison_original_h264.mp4) |
+| 30% drop, **no recovery** | 1,180 patches lost — people visibly disappear from the stream | [`comparison_drop_only_h264.mp4`](results/comparison_drop_only_h264.mp4) |
+| 30% drop, **full system** | 1,135 patches recovered via ZoH + Kalman, plus 192 virtual patches generated in predict-only mode — tracking continuity preserved | [`comparison_full_h264.mp4`](results/comparison_full_h264.mp4) |
 
 Even at 50% packet drop, the PID controller pins quality at its minimum to maximize arrival probability, and Kalman prediction + ZoH keep tracking alive. When the network is restored, quality climbs back to 95 and the state returns to Normal.
 
-See `results/` for the full quality-vs-bytes sweep and evaluation outputs.
-
 ## 6. Repository Layout
 
-| Folder | Role |
+| Folder / File | Role |
 |---|---|
 | `src/edge/` | Runs on Jetson Orin Nano |
 | `src/edge/detector/` | YOLOv8n TensorRT inference wrapper |
 | `src/edge/patch/` | Bounding-box crop + adaptive JPEG encoding |
 | `src/edge/transport/` | UDP sender, packet builder, chunking, header redundancy |
+| `src/edge/control/` | Feedback receiver (server → edge quality commands) |
 | `src/server/` | Runs on the laptop |
-| `src/server/transport/` | UDP receiver + constraint simulator (drop / delay) |
+| `src/server/transport/` | UDP receiver, reorder buffer, constraint simulator (drop / delay) |
 | `src/server/recovery/` | IoU tracker, Zero-order Hold, Kalman filter, predict-only mode |
 | `src/server/stitcher/` | ROI stitching (paste patches onto neutral background) |
-| `src/server/decision/` | Normal / Warning / Emergency state machine + PID controller |
-| `src/common/` | Packet schemas and shared config |
+| `src/server/decision/` | Normal / Warning / Emergency state machine |
+| `src/server/control/` | PI adaptive quality controller, feedback sender |
+| `src/common/` | Packet schemas (wire format) and shared config |
 | `dashboard/` | Streamlit web GUI (controls, metrics, comparison tab) |
-| `data/` | Sample test images and demo clips |
-| `scripts/` | Build, run, and test scripts |
-| `models/` | Source models (`.pt`, `.onnx`) |
-| `engines/` | TensorRT `.engine` files (built on Jetson, gitignored) |
-| `results/` | Evaluation outputs, plots, tables |
-| `docs/` | Proposal, diagrams, report |
+| `data/` | Sample test video (`test_vid.mp4`) |
+| `scripts/` | Build, run, and test entry points |
+| `models/` | `yolov8n.onnx` — committed ONNX model, start of the TensorRT build chain |
+| `engines/` | TensorRT `.engine` files (built per-device on Jetson, gitignored) |
+| `results/` | Three-way comparison videos (see §5.2) |
+| `docs/` | Final presentation slides |
+| `TROUBLESHOOTING.md` | Major bugs encountered and how they were solved |
 
 ## 7. Quick Start
 
@@ -150,13 +151,15 @@ bash scripts/build_engine_fp16.sh
 
 Output: `engines/yolov8n_fp16.engine` (build log in `logs/`).
 
+The committed `models/yolov8n.onnx` is the input to the TensorRT build, so the `onnx → engine` chain is fully reproducible from this repository. (The original `yolov8n.pt` is auto-downloaded by ultralytics if you need to re-export the ONNX.)
+
 ### 7.2 Single-image sanity check (Jetson)
 
 ```bash
 PYTHONPATH=. python -u scripts/test_patch_pipeline.py
 ```
 
-Runs detect → extract → encode on a test image, writes patch JPEGs to `results/patches/` and a quality sweep CSV to `results/patch_sizes.csv`.
+Runs detect → extract → encode on a test image, writes patch JPEGs and a quality sweep CSV under `results/`.
 
 ### 7.3 Loopback UDP test (Jetson, single process)
 
@@ -207,7 +210,7 @@ Key flags: `--reorder` buffers out-of-order chunks (size 10, 500 ms wait); `--re
 ```bash
 PYTHONPATH=. python -u scripts/run_edge_video.py \
     --server <laptop_ip> --port 9000 \
-    --source data/videos/demo_clip.mp4 \
+    --source data/test_vid.mp4 \
     --engine engines/yolov8n_fp16.engine \
     --quality 75 --max-frames 500 --target-fps 12 \
     --header-redundancy 5 \
@@ -215,7 +218,7 @@ PYTHONPATH=. python -u scripts/run_edge_video.py \
     --log-every 50
 ```
 
-`--header-redundancy 5` sends each frame header five times (recovery layer 1); `--enable-feedback` lets the edge accept PID quality commands from the server, starting from q=75.
+`--header-redundancy 5` sends each frame header five times (recovery layer 1); `--enable-feedback` lets the edge accept PID quality commands from the server, starting from q=75. A live camera can be used instead of a file with `--source 0`.
 
 The laptop writes the stitched output to `results/exp_demo.mp4` — persons only, on a neutral grey canvas, with green boxes for original detections and cyan for recovered/predicted patches.
 
@@ -230,7 +233,7 @@ PYTHONPATH=. python -u scripts/run_server_stitch.py \
 # Jetson
 PYTHONPATH=. python -u scripts/run_edge_video.py \
     --server <laptop_ip> --port 9000 \
-    --source data/videos/demo_clip.mp4 \
+    --source data/test_vid.mp4 \
     --engine engines/yolov8n_fp16.engine \
     --target-fps 12 --max-frames 100
 ```
@@ -244,4 +247,4 @@ PYTHONPATH=. python -u scripts/run_edge_video.py \
 ## 9. Documentation
 
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — major bugs encountered and how they were solved
-- `docs/` — proposal, architecture diagrams, final report
+- [`docs/`](docs/) — final presentation slides
