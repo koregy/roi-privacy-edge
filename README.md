@@ -246,5 +246,5 @@ PYTHONPATH=. python -u scripts/run_edge_video.py \
 
 ## 9. Documentation
 
-- [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — major bugs encountered and how they were solved
+- [`TROUBLESHOOTING.md`](Troubleshooting.md) — major bugs encountered and how they were solved
 - [`docs/`](docs/) — final presentation slides
