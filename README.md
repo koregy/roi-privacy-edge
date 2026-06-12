@@ -76,7 +76,7 @@ In the live view, **green boxes** mark original complete detections, **cyan boxe
 
 ## 4. Dashboard
 
-A Streamlit dashboard provides live control and observability:
+A Streamlit dashboard provides live control and observability. Controls are propagated to the running server process through a small JSON control file (`/tmp/roi_control.json`), so settings take effect live without restarting:
 
 - **Sidebar controls** — network drop level (Clean 0% / Heavy 30% / Severe 50%) and system mode (no protection / full recovery).
 - **Main panel** — current security state, real-time metrics (reception ratio, JPEG quality, recovered / predicted patch counters), and adaptation charts.
@@ -166,38 +166,74 @@ PYTHONPATH=. python -u scripts/test_udp_loopback.py
 
 Verifies the wire format and chunk reassembly byte-for-byte over 127.0.0.1.
 
-### 7.4 End-to-end ROI streaming (two machines)
+### 7.4 Full demo (two machines, all features)
 
-On the **laptop** (server), start the receiver + stitcher:
+This is the configuration used in the live demonstration: reorder buffer, full recovery stack, decision machine, adaptive PID quality, and edge feedback all enabled.
 
-```bash
-PYTHONPATH=. python -u scripts/run_server_stitch.py \
-    --output results/stitched.mp4 \
-    --fps 12 \
-    --idle-timeout 5
-```
-
-On the **Jetson** (edge), start the capture loop:
+**1. (Laptop)** Initialize the runtime control file. The dashboard writes network and recovery settings here, and the server process reads it live — this is how the sidebar controls take effect without restarting:
 
 ```bash
-PYTHONPATH=. python -u scripts/run_edge_video.py \
-    --server <laptop_ip> \
-    --source data/videos/person-bicycle-car-detection.mp4 \
-    --target-fps 12 \
-    --max-frames 100
+echo '{"drop_prob": 0.0, "recovery_enabled": false, "kalman_enabled": false, "predict_enabled": false}' > /tmp/roi_control.json
 ```
 
-The laptop writes `results/stitched.mp4` — persons only, on a neutral grey canvas.
-
-### 7.5 Live dashboard
-
-On the laptop:
+**2. (Laptop)** Start the Streamlit dashboard:
 
 ```bash
 PYTHONPATH=. streamlit run dashboard/app.py
 ```
 
-Use the sidebar to switch network drop levels (0% / 30% / 50%) and toggle the recovery system on or off; the comparison tab replays the same clip under all three configurations.
+The sidebar switches network drop levels (Clean 0% / Heavy 30% / Severe 50%) and toggles the recovery system; the comparison tab replays the same clip under all three configurations.
+
+**3. (Laptop)** Start the receiver + stitcher with the full feature set:
+
+```bash
+PYTHONPATH=. python -u scripts/run_server_stitch.py \
+    --bind 0.0.0.0 --port 9000 \
+    --output results/exp_demo.mp4 \
+    --fps 25 \
+    --drop-prob 0.0 \
+    --reorder --reorder-size 10 --reorder-wait-ms 500 \
+    --recovery --recovery-iou 0.15 --recovery-max-age 30 \
+    --decision --adaptive --draw-bbox \
+    --adaptive-min-q 30 \
+    --feedback --feedback-edge-host <jetson_ip> \
+    --idle-timeout 5
+```
+
+Key flags: `--reorder` buffers out-of-order chunks (size 10, 500 ms wait); `--recovery` enables ZoH + Kalman with IoU matching threshold 0.15 and a 30-frame max patch age; `--decision --adaptive` turns on the state machine and PID controller (quality floor 30); `--feedback` sends quality commands back to the edge.
+
+**4. (Jetson)** Start the edge capture loop:
+
+```bash
+PYTHONPATH=. python -u scripts/run_edge_video.py \
+    --server <laptop_ip> --port 9000 \
+    --source data/videos/demo_clip.mp4 \
+    --engine engines/yolov8n_fp16.engine \
+    --quality 75 --max-frames 500 --target-fps 12 \
+    --header-redundancy 5 \
+    --enable-feedback \
+    --log-every 50
+```
+
+`--header-redundancy 5` sends each frame header five times (recovery layer 1); `--enable-feedback` lets the edge accept PID quality commands from the server, starting from q=75.
+
+The laptop writes the stitched output to `results/exp_demo.mp4` — persons only, on a neutral grey canvas, with green boxes for original detections and cyan for recovered/predicted patches.
+
+### 7.5 Minimal two-machine run (no recovery, sanity check)
+
+```bash
+# Laptop
+PYTHONPATH=. python -u scripts/run_server_stitch.py \
+    --bind 0.0.0.0 --port 9000 \
+    --output results/stitched.mp4 --fps 12 --idle-timeout 5
+
+# Jetson
+PYTHONPATH=. python -u scripts/run_edge_video.py \
+    --server <laptop_ip> --port 9000 \
+    --source data/videos/demo_clip.mp4 \
+    --engine engines/yolov8n_fp16.engine \
+    --target-fps 12 --max-frames 100
+```
 
 ## 8. Hardware / Software
 
