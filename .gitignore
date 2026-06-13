@@ -25,6 +25,11 @@ results/*.jpg
 results/*.csv
 results/*.npy
 
+results/*.mp4
+!results/comparison_drop_only_h264.mp4
+!results/comparison_full_h264.mp4
+!results/comparison_original_h264.mp4
+
 # --- Data ---
 data/*
 !data/.gitkeep
