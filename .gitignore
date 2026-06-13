@@ -4,6 +4,7 @@
 # --- Large model weights (manage separately if needed) ---
 *.pt
 *.pth
+!models/yolov8n.pt
 
 # --- Python ---
 __pycache__/
@@ -17,33 +18,21 @@ env/
 .pytest_cache/
 .mypy_cache/
 
-# --- Logs / results (keep folders via .gitkeep, ignore contents) ---
+# --- Logs (keep folder via .gitkeep, ignore contents) ---
 logs/*
 !logs/.gitkeep
-results/*.png
-results/*.jpg
-results/*.csv
-results/*.npy
 
-results/*.mp4
+# --- Results: ignore intermediates, keep final deliverables ---
+results/*
 !results/comparison_drop_only_h264.mp4
 !results/comparison_full_h264.mp4
 !results/comparison_original_h264.mp4
 
-# --- Data ---
+!results/patch_sizes.csv
+!results/experiments.md
+
+# --- Data: ignore raw clips, keep minimal samples ---
 data/*
-!data/.gitkeep
-
-# --- OS ---
-.DS_Store
-Thumbs.db
-
-# --- IDE ---
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Generated outputs
-*.mp4
-backup/
+!data/test_images/
+data/test_images/*
+!data/test
