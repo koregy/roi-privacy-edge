@@ -36,3 +36,4 @@ data/*
 !data/test_images/
 data/test_images/*
 !data/test
+!data/test_vid.mp4
